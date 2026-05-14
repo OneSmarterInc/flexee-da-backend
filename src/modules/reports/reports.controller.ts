@@ -1,0 +1,201 @@
+// src/modules/reports/reports.controller.ts
+//
+// FLEXEE DA — Reports controller (Analytics Edition).
+//
+// Routes:
+//   GET /reports/kpi-history/:simulationId/:firmId
+//   GET /reports/kpi-history/:simulationId/:firmId/:startQuarter/:endQuarter
+//   GET /reports/competitor-comparison/:simulationId/:firmId/:quarter
+//   GET /reports/balanced-scorecard/:simulationId/:firmId/:quarter
+//   GET /reports/financial-summary/:simulationId/:quarter
+//   GET /reports/10q/:simulationId/:firmId/:quarter
+//   GET /reports/10q/:simulationId/:firmId
+//
+// Removed corporate-edition routes:
+//   ✗ GET /reports/intelligence/:sim/:firm/:quarter   — Intel Center gone
+//   ✗ GET /reports/warranty-claims/:sim/:firm/:quarter — Warranty gone
+//   ✗ GET /reports/green-score/:sim/:firm             — Green score gone
+//
+// All five corresponding service methods were also deleted; the underlying
+// schemas (IntelligenceReport, WarrantyClaim, GreenScoreHistory) were removed
+// from src/schemas/index.ts. If a frontend still calls these, it'll get 404 —
+// remove those fetches as part of the cockpit DA pass.
+
+import {
+  Controller,
+  Get,
+  Param,
+  BadRequestException,
+  NotFoundException,
+  UseGuards,
+} from '@nestjs/common';
+import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { ReportsService } from './reports.service';
+
+@Controller('reports')
+@UseGuards(JwtAuthGuard)
+export class ReportsController {
+  constructor(private reportsService: ReportsService) {}
+
+  // ============================================================================
+  // KPI HISTORY
+  // ============================================================================
+
+  /**
+   * KPI history for a firm — quarter range.
+   * Order matters: this must be declared BEFORE the no-range variant below
+   * so Nest matches `:startQuarter/:endQuarter` first.
+   */
+  @Get('kpi-history/:simulationId/:firmId/:startQuarter/:endQuarter')
+  async getKpiHistoryByRange(
+    @Param('simulationId') simulationId: string,
+    @Param('firmId') firmId: string,
+    @Param('startQuarter') startQuarter: string,
+    @Param('endQuarter') endQuarter: string,
+  ) {
+    const start = parseInt(startQuarter, 10);
+    const end = parseInt(endQuarter, 10);
+
+    if (isNaN(start) || isNaN(end) || start > end) {
+      throw new BadRequestException(
+        'Invalid quarter range. Start must be <= End',
+      );
+    }
+
+    return this.reportsService.getKpiHistoryByRange(
+      simulationId,
+      firmId,
+      start,
+      end,
+    );
+  }
+
+  /**
+   * Full KPI history for a firm.
+   */
+  @Get('kpi-history/:simulationId/:firmId')
+  async getKpiHistory(
+    @Param('simulationId') simulationId: string,
+    @Param('firmId') firmId: string,
+  ) {
+    return this.reportsService.getKpiHistory(simulationId, firmId);
+  }
+
+  // ============================================================================
+  // COMPETITOR COMPARISON
+  // ============================================================================
+
+  @Get('competitor-comparison/:simulationId/:firmId/:quarter')
+  async getCompetitorComparison(
+    @Param('simulationId') simulationId: string,
+    @Param('firmId') firmId: string,
+    @Param('quarter') quarter: string,
+  ) {
+    const quarterNum = this.parseQuarter(quarter);
+
+    return this.reportsService.getCompetitorComparison(
+      simulationId,
+      firmId,
+      quarterNum,
+    );
+  }
+
+  // ============================================================================
+  // BALANCED SCORECARD
+  // ============================================================================
+
+  @Get('balanced-scorecard/:simulationId/:firmId/:quarter')
+  async getBalancedScorecard(
+    @Param('simulationId') simulationId: string,
+    @Param('firmId') firmId: string,
+    @Param('quarter') quarter: string,
+  ) {
+    const quarterNum = this.parseQuarter(quarter);
+
+    const scorecard = await this.reportsService.getBalancedScorecard(
+      simulationId,
+      firmId,
+      quarterNum,
+    );
+
+    if (!scorecard) {
+      throw new NotFoundException(
+        `Balanced Scorecard not found for firm ${firmId}, quarter ${quarterNum}`,
+      );
+    }
+
+    return scorecard;
+  }
+
+  // ============================================================================
+  // FINANCIAL SUMMARY (cross-firm)
+  // ============================================================================
+
+  @Get('financial-summary/:simulationId/:quarter')
+  async getFinancialSummary(
+    @Param('simulationId') simulationId: string,
+    @Param('quarter') quarter: string,
+  ) {
+    const quarterNum = this.parseQuarter(quarter);
+
+    return this.reportsService.getFinancialSummary(simulationId, quarterNum);
+  }
+
+  // ============================================================================
+  // 10-Q REPORT
+  // ============================================================================
+
+  /**
+   * Quarterly 10-Q for a single quarter.
+   * Order: more-specific route before the firm-only variant.
+   */
+  @Get('10q/:simulationId/:firmId/:quarter')
+  async getTenQReport(
+    @Param('simulationId') simulationId: string,
+    @Param('firmId') firmId: string,
+    @Param('quarter') quarter: string,
+  ) {
+    const quarterNum = this.parseQuarter(quarter);
+
+    const report = await this.reportsService.getTenQReport(
+      simulationId,
+      firmId,
+      quarterNum,
+    );
+
+    if (!report) {
+      throw new NotFoundException(
+        `10-Q report not found for firm ${firmId}, quarter ${quarterNum}`,
+      );
+    }
+
+    return report;
+  }
+
+  /**
+   * All persisted 10-Qs for a firm.
+   */
+  @Get('10q/:simulationId/:firmId')
+  async getTenQHistory(
+    @Param('simulationId') simulationId: string,
+    @Param('firmId') firmId: string,
+  ) {
+    return this.reportsService.getTenQHistory(simulationId, firmId);
+  }
+
+  // ============================================================================
+  // PRIVATE HELPERS
+  // ============================================================================
+
+  /**
+   * Parses a path-param quarter string and validates it's a positive integer.
+   * Throws BadRequestException with a consistent message on failure.
+   */
+  private parseQuarter(value: string): number {
+    const n = parseInt(value, 10);
+    if (isNaN(n) || n < 1) {
+      throw new BadRequestException('Quarter must be a positive number');
+    }
+    return n;
+  }
+}
