@@ -148,4 +148,30 @@ export class UpdateSimulationDto {
   @IsOptional()
   @IsBoolean()
   chartShowsAllFirms?: boolean;
+
+  @ApiPropertyOptional({
+    default: 30,
+    description: 'Maximum number of students that can enroll in this simulation',
+    minimum: 0,
+  })
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  enrollmentCapacity?: number;
+
+  @ApiPropertyOptional({
+    enum: ['NOT_DEPLOYED', 'DEPLOYED'],
+    description: 'Deployment status - NOT_DEPLOYED hides from faculty/students until deployed',
+  })
+  @IsOptional()
+  @IsIn(['NOT_DEPLOYED', 'DEPLOYED'] as const)
+  deploymentStatus?: string;
+
+  @ApiPropertyOptional({
+    description: 'Marks that faculty has explicitly reviewed and saved the module schedule. Used by the setup flow to gate Step 2 completion.',
+    example: true,
+  })
+  @IsOptional()
+  @IsBoolean()
+  scheduleSetByFaculty?: boolean;
 }

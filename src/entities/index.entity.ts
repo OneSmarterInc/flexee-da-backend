@@ -255,11 +255,46 @@ export class CostBreakdown {
   @Prop({ default: 0 })  interest!: number;
 }
 
+// ── Quarterly Schedule Item ─────────────────────────────────────────────────
+// Tracks planned and actual dates for each quarter in the simulation,
+// accounting for faculty extensions via timezone-aware calculations
+@Schema({ _id: false })
+export class QuarterScheduleItem {
+  @Prop({ required: true })
+  quarterNumber!: number;
+
+  // Planned start (set at simulation creation, adjusted if prior quarters extended)
+  @Prop({ type: Date, required: true })
+  plannedStartAt!: Date;
+
+  // Planned end (planned start + quarterDurationDays, adjusted for extensions)
+  @Prop({ type: Date, required: true })
+  plannedEndAt!: Date;
+
+  // Actual start (when quarter actually opened, null until advanceQuarter)
+  @Prop({ type: Date, default: null })
+  actualStartAt?: Date | null;
+
+  // Actual end (when quarter actually closed, null until advanceQuarter)
+  @Prop({ type: Date, default: null })
+  actualEndAt?: Date | null;
+
+  // Days extended by faculty (applied when quarter is extended)
+  @Prop({ default: 0, min: 0 })
+  extendedByDays!: number;
+
+  // Metadata for audit trail
+  @Prop({ type: Date, default: null })
+  extendedAt?: Date | null;
+
+  @Prop({ default: '' })
+  extensionReason?: string;
+}
+
 // ============================================================================
 // SIMULATION SCHEMA
 // ============================================================================
 export type SimulationDocument = Simulation & Document;
-
 @Schema({ timestamps: true, collection: 'simulations' })
 export class Simulation {
   @Prop({ required: true })
@@ -321,6 +356,11 @@ export class Simulation {
   @Prop({ default: 14, min: 1, max: 90 })
   quarterDurationDays!: number;
 
+  // Start date for the simulation. When the first quarter begins.
+  // If not set, defaults to current time when first quarter starts.
+  @Prop({ type: Date, default: null })
+  simulationStartDate!: Date | null;
+
   // When the currently-active quarter window opened. Set whenever
   // advanceQuarter creates the next quarter's initial states. Used by the
   // cockpit to render a "Q3 closes in 3 days" countdown.
@@ -348,6 +388,9 @@ export class Simulation {
   @Prop({ default: false })
   showQuarterData!: boolean;
 
+  @Prop({ default: 30, min: 0 })
+  enrollmentCapacity!: number;
+
   @Prop({ default: true })
   chartShowsAllFirms!: boolean;
 
@@ -366,6 +409,40 @@ export class Simulation {
     default: [],
   })
   assignedModules!: string[];
+
+  // ── DEPLOYMENT STATUS (Two stages: Faculty deployment, then Student deployment) ──
+  @Prop({ enum: ['NOT_DEPLOYED', 'FACULTY_DEPLOYED', 'STUDENT_DEPLOYED'], default: 'NOT_DEPLOYED' })
+  deploymentStatus!: string;
+
+  @Prop({ type: Date, default: null })
+  deployedForFacultyAt?: Date | null;
+
+  @Prop({ type: Date, default: null })
+  deployedForStudentAt?: Date | null;
+
+  @Prop({ default: false })
+  scheduleSetByFaculty!: boolean;
+
+  // ── TIMEZONE & QUARTERLY SCHEDULING ────────────────────────────────────
+  // IANA timezone identifier (e.g., 'America/New_York', 'Europe/London')
+  // Used to calculate when quarters open/close for faculty in their local time
+  @Prop({ default: 'UTC' })
+  timezone!: string;
+
+  // Full schedule of all quarters in this simulation, including planned/actual
+  // dates and any faculty-applied extensions. Enables faculty to extend
+  // individual quarters and auto-adjusts all subsequent quarter end dates.
+  @Prop({ type: [QuarterScheduleItem], default: () => [] })
+  quarterSchedule!: QuarterScheduleItem[];
+
+  // ── REGISTRATION TOKEN ──────────────────────────────────────────────────
+  // Unique token for public registration link. Students can join using this token.
+  // Generated when simulation is created.
+  @Prop({ unique: true, sparse: true })
+  registrationToken?: string;
+
+  @Prop({ type: Date, default: null })
+  lastSweptAt!: Date | null;
 }
 
 export const SimulationSchema = SchemaFactory.createForClass(Simulation);
@@ -1134,6 +1211,28 @@ export class Enrollment {
 
   @Prop()
   lastActivityAt?: Date;
+
+  // ── STUDENT PAYMENT TRACKING ────────────────────────────────────────────
+  // Faculty marks individual students as paid or unpaid for this simulation.
+  // Each student's payment status is tracked independently.
+  @Prop({ default: false })
+  hasPaid!: boolean;
+
+  // Date when faculty marked this student as paid (null if unpaid)
+  @Prop({ type: Date, default: null })
+  paidAt?: Date | null;
+
+  // Optional notes from faculty about payment (e.g., "paid via venmo", "pending invoice")
+  @Prop({ default: '' })
+  paymentNotes?: string;
+
+  // Individual student payment due date (can differ from simulation level)
+  @Prop({ type: Date, default: null })
+  paymentDueDate?: Date | null;
+
+  // Extended payment date for this student (faculty can extend individual deadlines)
+  @Prop({ type: Date, default: null })
+  paymentExtendedDate?: Date | null;
 }
 
 export const EnrollmentSchema = SchemaFactory.createForClass(Enrollment);
@@ -1601,3 +1700,53 @@ StudentOnboardingSchema.index({ inviteToken: 1 }, { unique: true });
 StudentOnboardingSchema.index({ status: 1, expiresAt: 1 });
 StudentOnboardingSchema.index({ user: 1 });
 StudentOnboardingSchema.index({ bulkImportId: 1 });
+
+// ============================================================================
+// REGISTRATION LINK — Shareable registration link for open self-registration
+// ============================================================================
+export enum RegistrationLinkStatus {
+  ACTIVE = 'ACTIVE',
+  EXPIRED = 'EXPIRED',
+  DISABLED = 'DISABLED',
+}
+
+export type RegistrationLinkDocument = RegistrationLink & Document;
+
+@Schema({ timestamps: true })
+export class RegistrationLink {
+  @Prop({ type: Types.ObjectId, ref: 'Simulation', required: true })
+  simulation!: Types.ObjectId;
+
+  @Prop({ required: true, unique: true })
+  token!: string;
+
+  @Prop({ enum: RegistrationLinkStatus, default: RegistrationLinkStatus.ACTIVE })
+  status!: RegistrationLinkStatus;
+
+  @Prop({ type: Types.ObjectId, ref: 'User', required: true })
+  createdBy!: Types.ObjectId;
+
+  @Prop({ default: () => new Date(Date.now() + 365 * 24 * 60 * 60 * 1000) })
+  expiresAt!: Date;
+
+  @Prop({ default: 0 })
+  usedCount!: number;
+
+  @Prop()
+  maxUses?: number;
+
+  @Prop()
+  description?: string;
+
+  @Prop()
+  createdAt?: Date;
+
+  @Prop()
+  updatedAt?: Date;
+}
+
+export const RegistrationLinkSchema = SchemaFactory.createForClass(RegistrationLink);
+
+RegistrationLinkSchema.index({ simulation: 1 });
+RegistrationLinkSchema.index({ token: 1 }, { unique: true });
+RegistrationLinkSchema.index({ status: 1, expiresAt: 1 });

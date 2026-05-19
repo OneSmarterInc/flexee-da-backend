@@ -29,7 +29,11 @@ import {
   NotFoundException,
   UseGuards,
 } from '@nestjs/common';
+import { ApiOperation, ApiResponse, ApiBearerAuth } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { RolesGuard } from '../auth/guards/roles.guard';
+import { Roles } from '../auth/decorators/roles.decorator';
+import { UserRole } from '../../entities/index.entity';
 import { ReportsService } from './reports.service';
 
 @Controller('reports')
@@ -181,6 +185,28 @@ export class ReportsController {
     @Param('firmId') firmId: string,
   ) {
     return this.reportsService.getTenQHistory(simulationId, firmId);
+  }
+
+  // ============================================================================
+  // SIMULATION PERFORMANCE
+  // ============================================================================
+
+  @Get('simulation/:simulationId/performance')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.FACULTY)
+  @ApiBearerAuth('JWT')
+  @ApiOperation({
+    summary: 'Get cross-firm performance time series for a simulation',
+    description:
+      'Returns full KPI history grouped by firm, plus a current-standings ' +
+      'leaderboard. Used by the faculty performance dashboard for line charts ' +
+      'across quarters and ranking tables.',
+  })
+  @ApiResponse({ status: 200, description: 'Performance data retrieved' })
+  async getSimulationPerformance(
+    @Param('simulationId') simulationId: string,
+  ) {
+    return this.reportsService.getSimulationPerformance(simulationId);
   }
 
   // ============================================================================

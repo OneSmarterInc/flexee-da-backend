@@ -10,8 +10,10 @@ import {
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
+import * as bcrypt from 'bcrypt';
 import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
+import { randomBytes } from 'crypto';
 import { CreateSimulationDto, ModuleScheduleDto } from './dto/create-simulation.dto';
 import {
   UpdateSimulationDto,
@@ -627,6 +629,16 @@ export class SimulationService {
   ): Promise<SimulationDocument> {
     const totalQuarters = dto.totalQuarters ?? 11;
     const scheduleConfig = this.resolveScheduleConfig(dto, totalQuarters);
+    const quarterDurationDays = dto.quarterDurationDays ?? 14;
+    const timezone = dto.timezone ?? 'UTC';
+    const simulationStartDate = dto.simulationStartDate ? new Date(dto.simulationStartDate) : null;
+
+    // Generate full quarterly schedule starting from the specified start date or now
+    const quarterSchedule = this.generateQuarterSchedule(
+      totalQuarters,
+      quarterDurationDays,
+      simulationStartDate || new Date(),
+    );
 
     const simulation = new this.simulationModel({
       name: dto.name,
@@ -652,7 +664,7 @@ export class SimulationService {
       },
       eventProbability: dto.eventProbability ?? 0.15,
       demandVariability: dto.demandVariability ?? 0.05,
-      quarterDurationDays: dto.quarterDurationDays ?? 14,
+      quarterDurationDays,
       chartShowsAllFirms: dto.chartShowsAllFirms ?? true,
       quarterStartedAt: null,
       quarterEndsAt: null,
@@ -661,6 +673,11 @@ export class SimulationService {
       facultyIds: dto.facultyIds?.map((id) => this.toObjectId(id)) ?? [],
       moduleSchedule: scheduleConfig.moduleSchedule,
       owner: this.toObjectId(userId),
+      enrollmentCapacity: dto.enrollmentCapacity ?? 30,
+      timezone,
+      simulationStartDate,
+      quarterSchedule,
+      registrationToken: randomBytes(32).toString('hex'),
     });
 
     const savedSimulation = await simulation.save();
@@ -1591,6 +1608,120 @@ export class SimulationService {
       '#EC4899',
     ];
     return colors[(firmNumber - 1) % colors.length];
+  }
+
+  // ============================================================================
+  // QUARTERLY SCHEDULE MANAGEMENT
+  // ============================================================================
+
+  /**
+   * Generate a full quarterly schedule for the entire simulation.
+   * @param totalQuarters Total number of quarters in the simulation
+   * @param quarterDurationDays Duration of each quarter in real-world days
+   * @param startDate The date when Q1 should start
+   * @returns Array of QuarterScheduleItem objects for all quarters
+   */
+  private generateQuarterSchedule(
+    totalQuarters: number,
+    quarterDurationDays: number,
+    startDate: Date,
+  ): any[] {
+    const schedule: any[] = [];
+    let currentStart = new Date(startDate);
+
+    for (let q = 1; q <= totalQuarters; q++) {
+      const plannedEnd = new Date(
+        currentStart.getTime() + quarterDurationDays * 86_400_000,
+      );
+
+      schedule.push({
+        quarterNumber: q,
+        plannedStartAt: new Date(currentStart),
+        plannedEndAt: plannedEnd,
+        actualStartAt: null,
+        actualEndAt: null,
+        extendedByDays: 0,
+        extendedAt: null,
+        extensionReason: '',
+      });
+
+      // Next quarter starts when this one ends
+      currentStart = plannedEnd;
+    }
+
+    return schedule;
+  }
+
+  /**
+   * Extend a specific quarter by N days and adjust all future quarters.
+   * Called by faculty to extend deadline for a specific quarter.
+   * @param simulationId The simulation ID
+   * @param quarterNumber The quarter to extend
+   * @param extensionDays Number of days to extend by
+   * @param reason Reason for extension (audit trail)
+   */
+  async extendQuarter(
+    simulationId: string,
+    quarterNumber: number,
+    extensionDays: number,
+    reason?: string,
+  ): Promise<SimulationDocument> {
+    if (extensionDays <= 0) {
+      throw new BadRequestException('Extension days must be greater than 0');
+    }
+
+    const simId = new Types.ObjectId(simulationId);
+    const simulation = await this.simulationModel.findById(simId);
+    if (!simulation) {
+      throw new NotFoundException(`Simulation ${simulationId} not found`);
+    }
+
+    if (!simulation.quarterSchedule || simulation.quarterSchedule.length === 0) {
+      throw new BadRequestException('No quarter schedule found for this simulation');
+    }
+
+    const quarterItem = simulation.quarterSchedule.find(
+      (q) => q.quarterNumber === quarterNumber,
+    );
+    if (!quarterItem) {
+      throw new BadRequestException(
+        `Quarter ${quarterNumber} not found in schedule`,
+      );
+    }
+
+    // Extend this quarter
+    const extensionMs = extensionDays * 86_400_000;
+    quarterItem.extendedByDays = (quarterItem.extendedByDays || 0) + extensionDays;
+    quarterItem.plannedEndAt = new Date(
+      quarterItem.plannedEndAt.getTime() + extensionMs,
+    );
+    quarterItem.extendedAt = new Date();
+    quarterItem.extensionReason = reason || '';
+
+    // Find the index of the extended quarter and shift all future quarters
+    const extendedQuarterIndex = simulation.quarterSchedule.findIndex(
+      (q) => q.quarterNumber === quarterNumber,
+    );
+    
+    // Adjust all future quarters (starting from the next one)
+    for (let i = extendedQuarterIndex + 1; i < simulation.quarterSchedule.length; i++) {
+      const nextQuarter = simulation.quarterSchedule[i];
+      nextQuarter.plannedStartAt = new Date(
+        nextQuarter.plannedStartAt.getTime() + extensionMs,
+      );
+      nextQuarter.plannedEndAt = new Date(
+        nextQuarter.plannedEndAt.getTime() + extensionMs,
+      );
+    }
+
+    // Update quarterEndsAt if this is the current quarter
+    if (simulation.currentQuarter === quarterNumber) {
+      simulation.quarterEndsAt = new Date(
+        simulation.quarterEndsAt!.getTime() + extensionMs,
+      );
+    }
+
+    return simulation.save();
   }
 
   // ============================================================================
@@ -3006,10 +3137,14 @@ export class SimulationService {
 
     let simulations: SimulationDocument[];
     if (user.role === UserRole.ADMIN) {
+      // Admins see all simulations
       simulations = await this.simulationModel.find().sort({ createdAt: -1 });
     } else if (user.role === UserRole.FACULTY) {
+      // Faculty only see simulations deployed for them or assigned to them
+      // (FACULTY_DEPLOYED and STUDENT_DEPLOYED states)
       simulations = await this.simulationModel
         .find({
+          deploymentStatus: { $in: ['FACULTY_DEPLOYED', 'STUDENT_DEPLOYED'] },
           $or: [
             { owner: this.toObjectId(userId) },
             { facultyIds: this.toObjectId(userId) },
@@ -3017,12 +3152,14 @@ export class SimulationService {
         })
         .sort({ createdAt: -1 });
     } else {
+      // Students only see simulations deployed for them (STUDENT_DEPLOYED)
       const enrollments = await this.enrollmentModel.find({
         user: this.toObjectId(userId),
         status: { $in: [EnrollmentStatus.ACTIVE, EnrollmentStatus.PENDING] },
       });
       simulations = await this.simulationModel
         .find({
+          deploymentStatus: 'STUDENT_DEPLOYED',
           _id: { $in: enrollments.map((e) => e.simulation) },
         })
         .sort({ createdAt: -1 });
@@ -3104,6 +3241,9 @@ export class SimulationService {
             decisionsSubmitted: e.decisionsSubmitted,
             createdAt: e['createdAt'],
             updatedAt: e['updatedAt'],
+            hasPaid: e.hasPaid,
+            paidAt: e.paidAt,
+            paymentNotes: e.paymentNotes,
           })),
           memberCount: enrollments.length,
         };
@@ -3198,7 +3338,25 @@ export class SimulationService {
         simulation.status as SimulationStatus,
         dto.status,
       );
-    Object.assign(simulation, dto);
+    
+    // Auto-mark faculty intent whenever schedule-related fields are edited.
+    // The frontend sends scheduleSetByFaculty:true explicitly, but this also
+    // covers any other path that touches the schedule (admin tools, scripts).
+    if (
+      dto.moduleSchedule ||
+      dto.orientationQuarters !== undefined ||
+      dto.schedulePreset !== undefined
+    ) {
+      (dto as any).scheduleSetByFaculty = true;
+    }
+    
+    // Only assign defined properties to avoid overwriting required fields with undefined
+    Object.entries(dto).forEach(([key, value]) => {
+      if (value !== undefined) {
+        (simulation as any)[key] = value;
+      }
+    });
+    
     await simulation.save();
     return this.findOne(simulationId);
   }
@@ -3685,6 +3843,9 @@ export class SimulationService {
           canViewCompetitorData: e.canViewCompetitorData,
           decisionsSubmitted: e.decisionsSubmitted,
           lastActivityAt: e.lastActivityAt,
+          hasPaid: e.hasPaid,
+          paidAt: e.paidAt,
+          paymentNotes: e.paymentNotes,
         })),
         memberCount: enrollments.length,
       });
@@ -3722,6 +3883,9 @@ export class SimulationService {
       role: e.role,
       decisionsSubmitted: e.decisionsSubmitted,
       lastActivityAt: e.lastActivityAt,
+      hasPaid: e.hasPaid,
+      paidAt: e.paidAt,
+      paymentNotes: e.paymentNotes,
     }));
 
     return {
@@ -3880,6 +4044,763 @@ export class SimulationService {
     await enrollment.save();
 
     return { success: true, enrollmentId };
+  }
+
+  /**
+   * Delete a single student enrollment from the simulation (enrollment only)
+   * Also removes the student from their firm's members list if enrolled in a firm
+   */
+  async deleteEnrollment(
+    simulationId: string,
+    enrollmentId: string,
+  ): Promise<{ deletedCount: number; deletedIds: string[]; message: string }> {
+    const simObjectId = this.toObjectId(simulationId);
+
+    const enrollment = await this.enrollmentModel.findOne({
+      _id: this.toObjectId(enrollmentId),
+      simulation: simObjectId,
+    });
+    if (!enrollment) {
+      throw new NotFoundException(`Enrollment ${enrollmentId} not found`);
+    }
+
+    // If student is enrolled in a firm, remove them from firm's members list
+    if (enrollment.firm) {
+      await this.firmModel.updateOne(
+        { _id: enrollment.firm },
+        { $pull: { members: enrollment.user } },
+      );
+    }
+
+    // Delete the enrollment
+    await this.enrollmentModel.deleteOne({ _id: this.toObjectId(enrollmentId) });
+
+    return {
+      deletedCount: 1,
+      deletedIds: [enrollmentId],
+      message: `Enrollment ${enrollmentId} deleted successfully. Student removed from firm members.`,
+    };
+  }
+
+  /**
+   * Delete a single student enrollment from the simulation with user deletion
+   * Also removes the student from their firm's members list if enrolled in a firm
+   * And deletes the user record from the Users collection
+   */
+  async deleteEnrollmentWithUser(
+    simulationId: string,
+    enrollmentId: string,
+  ): Promise<{ deletedCount: number; deletedIds: string[]; message: string }> {
+    const simObjectId = this.toObjectId(simulationId);
+
+    const enrollment = await this.enrollmentModel.findOne({
+      _id: this.toObjectId(enrollmentId),
+      simulation: simObjectId,
+    });
+    if (!enrollment) {
+      throw new NotFoundException(`Enrollment ${enrollmentId} not found`);
+    }
+
+    const userId = enrollment.user;
+
+    // If student is enrolled in a firm, remove them from firm's members list
+    if (enrollment.firm) {
+      await this.firmModel.updateOne(
+        { _id: enrollment.firm },
+        { $pull: { members: userId } },
+      );
+    }
+
+    // Delete the enrollment
+    await this.enrollmentModel.deleteOne({ _id: this.toObjectId(enrollmentId) });
+
+    // Delete the user from Users collection
+    await this.userModel.deleteOne({ _id: userId });
+
+    return {
+      deletedCount: 1,
+      deletedIds: [enrollmentId],
+      message: `Enrollment ${enrollmentId} and user deleted successfully.`,
+    };
+  }
+
+  /**
+   * Bulk delete multiple student enrollments from the simulation (enrollments only)
+   * Also removes students from their firm's members list if enrolled in firms
+   */
+  async bulkDeleteEnrollments(
+    simulationId: string,
+    enrollmentIds: string[],
+  ): Promise<{ deletedCount: number; deletedIds: string[]; message: string }> {
+    const simObjectId = this.toObjectId(simulationId);
+    const enrollmentObjectIds = enrollmentIds.map(id => this.toObjectId(id));
+
+    // Verify all enrollments belong to this simulation
+    const enrollments = await this.enrollmentModel.find({
+      _id: { $in: enrollmentObjectIds },
+      simulation: simObjectId,
+    });
+
+    if (enrollments.length === 0) {
+      throw new NotFoundException(
+        `No enrollments found for the given IDs in simulation ${simulationId}`,
+      );
+    }
+
+    if (enrollments.length !== enrollmentIds.length) {
+      throw new BadRequestException(
+        `Some enrollment IDs do not belong to simulation ${simulationId}`,
+      );
+    }
+
+    // Remove students from their firms' members lists
+    for (const enrollment of enrollments) {
+      if (enrollment.firm) {
+        await this.firmModel.updateOne(
+          { _id: enrollment.firm },
+          { $pull: { members: enrollment.user } },
+        );
+      }
+    }
+
+    // Delete all enrollments
+    const result = await this.enrollmentModel.deleteMany({
+      _id: { $in: enrollmentObjectIds },
+      simulation: simObjectId,
+    });
+
+    return {
+      deletedCount: result.deletedCount || 0,
+      deletedIds: enrollmentIds,
+      message: `${result.deletedCount || 0} enrollments deleted successfully.`,
+    };
+  }
+
+  /**
+   * Bulk delete multiple student enrollments from the simulation with user deletion
+   * Also removes students from their firm's members list if enrolled in firms
+   * And deletes the user records from the Users collection
+   */
+  async bulkDeleteEnrollmentsWithUsers(
+    simulationId: string,
+    enrollmentIds: string[],
+  ): Promise<{ deletedCount: number; deletedIds: string[]; message: string }> {
+    const simObjectId = this.toObjectId(simulationId);
+    const enrollmentObjectIds = enrollmentIds.map(id => this.toObjectId(id));
+
+    // Verify all enrollments belong to this simulation
+    const enrollments = await this.enrollmentModel.find({
+      _id: { $in: enrollmentObjectIds },
+      simulation: simObjectId,
+    });
+
+    if (enrollments.length === 0) {
+      throw new NotFoundException(
+        `No enrollments found for the given IDs in simulation ${simulationId}`,
+      );
+    }
+
+    if (enrollments.length !== enrollmentIds.length) {
+      throw new BadRequestException(
+        `Some enrollment IDs do not belong to simulation ${simulationId}`,
+      );
+    }
+
+    // Collect user IDs for deletion
+    const userIds = enrollments.map(e => e.user);
+
+    // Remove students from their firms' members lists
+    for (const enrollment of enrollments) {
+      if (enrollment.firm) {
+        await this.firmModel.updateOne(
+          { _id: enrollment.firm },
+          { $pull: { members: enrollment.user } },
+        );
+      }
+    }
+
+    // Delete all enrollments
+    const result = await this.enrollmentModel.deleteMany({
+      _id: { $in: enrollmentObjectIds },
+      simulation: simObjectId,
+    });
+
+    // Delete all users from Users collection
+    await this.userModel.deleteMany({
+      _id: { $in: userIds },
+    });
+
+    return {
+      deletedCount: result.deletedCount || 0,
+      deletedIds: enrollmentIds,
+      message: `${result.deletedCount || 0} enrollments and ${userIds.length} users deleted successfully.`,
+    };
+  }
+
+  // ============================================================================
+  // ENROLLMENT DETAIL & ACCESS CONTROL
+  // ============================================================================
+
+  async getEnrollmentDetail(
+    simulationId: string,
+    enrollmentId: string,
+  ): Promise<any> {
+    const simObjectId = this.toObjectId(simulationId);
+    const enrObjectId = this.toObjectId(enrollmentId);
+
+    const enrollment = await this.enrollmentModel
+      .findOne({ _id: enrObjectId, simulation: simObjectId })
+      .populate('user', 'email firstName lastName studentId isActive lastLoginAt organization createdAt')
+      .populate('firm');
+
+    if (!enrollment) {
+      throw new NotFoundException(`Enrollment ${enrollmentId} not found in this simulation`);
+    }
+
+    const user = enrollment.user as any;
+    const firm = enrollment.firm as any;
+
+    // Count decisions submitted by this user in this sim
+    let decisionsSubmitted = 0;
+    try {
+      decisionsSubmitted = await this.decisionModel.countDocuments({
+        simulation: simObjectId,
+        $or: [
+          { submittedBy: user?._id },
+          { user: user?._id },
+        ],
+      });
+    } catch { /* decisionModel might not be available */ }
+
+    return {
+      id: enrollment._id,
+      user: user ? {
+        id: user._id,
+        email: user.email,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        studentId: user.studentId,
+        organization: user.organization,
+        isActive: user.isActive,
+        lastLoginAt: user.lastLoginAt,
+        createdAt: user['createdAt'],
+      } : null,
+      firm: firm ? {
+        id: firm._id,
+        name: firm.name,
+        firmNumber: firm.firmNumber,
+        color: firm.color,
+      } : null,
+      status: enrollment.status,
+      role: enrollment.role,
+      teamName: enrollment.teamName,
+      canSubmitDecisions: enrollment.canSubmitDecisions,
+      canViewReports: enrollment.canViewReports,
+      canViewCompetitorData: enrollment.canViewCompetitorData,
+      decisionsSubmitted: enrollment.decisionsSubmitted ?? decisionsSubmitted,
+      lastActivityAt: enrollment.lastActivityAt,
+      hasPaid: enrollment.hasPaid,
+      paidAt: enrollment.paidAt,
+      paymentNotes: enrollment.paymentNotes,
+      createdAt: enrollment['createdAt'],
+      updatedAt: enrollment['updatedAt'],
+    };
+  }
+
+  async blockEnrollment(
+    simulationId: string,
+    enrollmentId: string,
+    reason?: string,
+  ): Promise<any> {
+    const simObjectId = this.toObjectId(simulationId);
+    const enrObjectId = this.toObjectId(enrollmentId);
+
+    const enrollment = await this.enrollmentModel.findOne({
+      _id: enrObjectId,
+      simulation: simObjectId,
+    });
+    if (!enrollment) {
+      throw new NotFoundException(`Enrollment ${enrollmentId} not found in this simulation`);
+    }
+    if (enrollment.status === EnrollmentStatus.DROPPED) {
+      return { ok: true, status: enrollment.status, alreadyBlocked: true };
+    }
+
+    enrollment.status = EnrollmentStatus.DROPPED;
+    await enrollment.save();
+
+    // Audit log only — don't pollute domain fields. If you have a dedicated
+    // audit log table, write the entry there with simulationId, enrollmentId,
+    // facultyUserId (pull from request context), reason, and timestamp.
+    console.log(
+      `[block] enrollment=${enrollmentId} sim=${simulationId} reason=${reason || '(none)'}`,
+    );
+
+    return {
+      ok: true,
+      status: enrollment.status,
+      enrollmentId: enrollment._id,
+      blockedAt: new Date(),
+      reason: reason || null,
+    };
+  }
+
+  async unblockEnrollment(
+    simulationId: string,
+    enrollmentId: string,
+  ): Promise<any> {
+    const simObjectId = this.toObjectId(simulationId);
+    const enrObjectId = this.toObjectId(enrollmentId);
+
+    const enrollment = await this.enrollmentModel.findOne({
+      _id: enrObjectId,
+      simulation: simObjectId,
+    });
+    if (!enrollment) {
+      throw new NotFoundException(`Enrollment ${enrollmentId} not found in this simulation`);
+    }
+    if (enrollment.status !== EnrollmentStatus.DROPPED) {
+      return { ok: true, status: enrollment.status, alreadyActive: true };
+    }
+
+    enrollment.status = EnrollmentStatus.ACTIVE;
+    await enrollment.save();
+
+    return {
+      ok: true,
+      status: enrollment.status,
+      enrollmentId: enrollment._id,
+    };
+  }
+
+  async resetEnrollmentPassword(
+    simulationId: string,
+    enrollmentId: string,
+  ): Promise<{ ok: true; tempPassword: string; userEmail: string }> {
+    const simObjectId = this.toObjectId(simulationId);
+    const enrObjectId = this.toObjectId(enrollmentId);
+
+    const enrollment = await this.enrollmentModel
+      .findOne({ _id: enrObjectId, simulation: simObjectId })
+      .populate('user', 'email firstName lastName passwordHash');
+
+    if (!enrollment) {
+      throw new NotFoundException(`Enrollment ${enrollmentId} not found in this simulation`);
+    }
+    const user = enrollment.user as any;
+    if (!user) {
+      throw new NotFoundException('Student user account not found');
+    }
+
+    const tempPassword = this.generateTempPassword();
+    const passwordHash = await bcrypt.hash(tempPassword, 10);
+
+    await this.userModel.updateOne(
+      { _id: user._id },
+      { $set: { passwordHash } },
+    );
+
+    return {
+      ok: true,
+      tempPassword,
+      userEmail: user.email,
+    };
+  }
+
+  private generateTempPassword(): string {
+    const upper = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+    const lower = 'abcdefghijkmnopqrstuvwxyz';
+    const digit = '23456789';
+    const crypto = require('crypto');
+    const pick = (chars: string, n: number) => Array.from(
+      { length: n },
+      () => chars[crypto.randomInt(0, chars.length)],
+    );
+    const all = [...pick(upper, 4), ...pick(lower, 4), ...pick(digit, 4)];
+    for (let i = all.length - 1; i > 0; i--) {
+      const j = crypto.randomInt(0, i + 1);
+      [all[i], all[j]] = [all[j], all[i]];
+    }
+    return all.join('');
+  }
+
+  // ============================================================================
+  // ACCESS CONTROL — check if student can view this simulation
+  // ============================================================================
+
+  async getMyAccessToSimulation(
+    simulationId: string,
+    userId: string,
+  ): Promise<{
+    access: 'ACTIVE' | 'PENDING' | 'BLOCKED' | 'NOT_ENROLLED' | 'COMPLETED';
+    enrollmentId?: string;
+    firm?: { id: string; name: string; color?: string; firmNumber?: number };
+    blockedAt?: Date;
+    reason?: string | null;
+  }> {
+    if (!userId) return { access: 'NOT_ENROLLED' };
+
+    const simObjectId = this.toObjectId(simulationId);
+    const userObjectId = this.toObjectId(userId);
+
+    const enrollment = await this.enrollmentModel
+      .findOne({ simulation: simObjectId, user: userObjectId })
+      .populate('firm');
+
+    if (!enrollment) return { access: 'NOT_ENROLLED' };
+
+    // Map enrollment status to a frontend-friendly access verdict. DROPPED is
+    // renamed BLOCKED here so the student-facing API speaks the right language.
+    const map: Record<string, 'ACTIVE' | 'PENDING' | 'BLOCKED' | 'COMPLETED'> = {
+      [EnrollmentStatus.ACTIVE]:    'ACTIVE',
+      [EnrollmentStatus.PENDING]:   'PENDING',
+      [EnrollmentStatus.DROPPED]:   'BLOCKED',
+      [EnrollmentStatus.COMPLETED]: 'COMPLETED',
+    };
+
+    const access = map[enrollment.status] || 'NOT_ENROLLED';
+    const firm = enrollment.firm as any;
+
+    return {
+      access,
+      enrollmentId: String(enrollment._id),
+      firm: firm ? {
+        id: String(firm._id),
+        name: firm.name,
+        color: firm.color,
+        firmNumber: firm.firmNumber,
+      } : undefined,
+      blockedAt: enrollment.status === EnrollmentStatus.DROPPED
+        ? (enrollment as any).updatedAt
+        : undefined,
+    };
+  }
+
+  // ============================================================================
+  // STUDENT PAYMENT TRACKING (per-student, per-simulation)
+  // ============================================================================
+
+  async markStudentPaid(
+    simulationId: string,
+    enrollmentId: string,
+    notes?: string,
+  ): Promise<any> {
+    const simObjectId = this.toObjectId(simulationId);
+    const enrollment = await this.enrollmentModel
+      .findOne({
+        _id: this.toObjectId(enrollmentId),
+        simulation: simObjectId,
+      })
+      .populate('user', 'email firstName lastName studentId');
+
+    if (!enrollment) {
+      throw new NotFoundException(`Enrollment ${enrollmentId} not found`);
+    }
+
+    enrollment.hasPaid = true;
+    enrollment.paidAt = new Date();
+    enrollment.paymentNotes = notes || '';
+    await enrollment.save();
+
+    return {
+      success: true,
+      enrollmentId,
+      message: `${(enrollment.user as any)?.firstName} ${(enrollment.user as any)?.lastName} marked as paid`,
+      hasPaid: enrollment.hasPaid,
+      paidAt: enrollment.paidAt,
+      paymentNotes: enrollment.paymentNotes,
+    };
+  }
+
+  async markStudentUnpaid(
+    simulationId: string,
+    enrollmentId: string,
+    notes?: string,
+  ): Promise<any> {
+    const simObjectId = this.toObjectId(simulationId);
+    const enrollment = await this.enrollmentModel
+      .findOne({
+        _id: this.toObjectId(enrollmentId),
+        simulation: simObjectId,
+      })
+      .populate('user', 'email firstName lastName studentId');
+
+    if (!enrollment) {
+      throw new NotFoundException(`Enrollment ${enrollmentId} not found`);
+    }
+
+    enrollment.hasPaid = false;
+    enrollment.paidAt = null;
+    enrollment.paymentNotes = notes || '';
+    await enrollment.save();
+
+    return {
+      success: true,
+      enrollmentId,
+      message: `${(enrollment.user as any)?.firstName} ${(enrollment.user as any)?.lastName} marked as unpaid`,
+      hasPaid: enrollment.hasPaid,
+      paidAt: enrollment.paidAt,
+      paymentNotes: enrollment.paymentNotes,
+    };
+  }
+
+  async getStudentPaymentStatus(
+    simulationId: string,
+    groupBy: 'firm' | 'payment' = 'firm',
+  ): Promise<any> {
+    const simObjectId = this.toObjectId(simulationId);
+
+    const simulation = await this.simulationModel.findById(simObjectId);
+    if (!simulation) {
+      throw new NotFoundException(`Simulation ${simulationId} not found`);
+    }
+
+    const enrollments = await this.enrollmentModel
+      .find({ simulation: simObjectId })
+      .populate('user', 'email firstName lastName studentId')
+      .populate('firm', 'firmNumber name color');
+
+    if (groupBy === 'payment') {
+      // Group by payment status
+      const paid: any[] = [];
+      const unpaid: any[] = [];
+
+      for (const enrollment of enrollments) {
+        const item = {
+          enrollmentId: enrollment._id,
+          student: {
+            id: (enrollment.user as any)?._id,
+            email: (enrollment.user as any)?.email,
+            firstName: (enrollment.user as any)?.firstName,
+            lastName: (enrollment.user as any)?.lastName,
+            studentId: (enrollment.user as any)?.studentId,
+          },
+          firm: enrollment.firm
+            ? {
+                id: (enrollment.firm as any)?._id,
+                firmNumber: (enrollment.firm as any)?.firmNumber,
+                name: (enrollment.firm as any)?.name,
+                color: (enrollment.firm as any)?.color,
+              }
+            : null,
+          hasPaid: enrollment.hasPaid,
+          paidAt: enrollment.paidAt,
+          paymentNotes: enrollment.paymentNotes,
+        };
+
+        if (enrollment.hasPaid) {
+          paid.push(item);
+        } else {
+          unpaid.push(item);
+        }
+      }
+
+      return {
+        simulationId,
+        totalStudents: enrollments.length,
+        paidCount: paid.length,
+        unpaidCount: unpaid.length,
+        paid,
+        unpaid,
+      };
+    } else {
+      // Group by firm (default)
+      const firms = await this.firmModel.find({ simulation: simObjectId });
+      const byFirm: any[] = [];
+
+      for (const firm of firms) {
+        const firmEnrollments = enrollments.filter(
+          (e) => String(e.firm?._id) === String(firm._id),
+        );
+
+        const paid = firmEnrollments.filter((e) => e.hasPaid);
+        const unpaid = firmEnrollments.filter((e) => !e.hasPaid);
+
+        byFirm.push({
+          firm: {
+            id: firm._id,
+            firmNumber: firm.firmNumber,
+            name: firm.name,
+            color: firm.color,
+          },
+          totalMembers: firmEnrollments.length,
+          paidCount: paid.length,
+          unpaidCount: unpaid.length,
+          members: firmEnrollments.map((e) => ({
+            enrollmentId: e._id,
+            student: {
+              id: (e.user as any)?._id,
+              email: (e.user as any)?.email,
+              firstName: (e.user as any)?.firstName,
+              lastName: (e.user as any)?.lastName,
+              studentId: (e.user as any)?.studentId,
+            },
+            hasPaid: e.hasPaid,
+            paidAt: e.paidAt,
+            paymentNotes: e.paymentNotes,
+          })),
+        });
+      }
+
+      // Also include unplaced students
+      const unplaced = enrollments.filter((e) => !e.firm);
+      if (unplaced.length > 0) {
+        byFirm.push({
+          firm: null,
+          totalMembers: unplaced.length,
+          paidCount: unplaced.filter((e) => e.hasPaid).length,
+          unpaidCount: unplaced.filter((e) => !e.hasPaid).length,
+          members: unplaced.map((e) => ({
+            enrollmentId: e._id,
+            student: {
+              id: (e.user as any)?._id,
+              email: (e.user as any)?.email,
+              firstName: (e.user as any)?.firstName,
+              lastName: (e.user as any)?.lastName,
+              studentId: (e.user as any)?.studentId,
+            },
+            hasPaid: e.hasPaid,
+            paidAt: e.paidAt,
+            paymentNotes: e.paymentNotes,
+          })),
+        });
+      }
+
+      const totalPaid = enrollments.filter((e) => e.hasPaid).length;
+      return {
+        simulationId,
+        totalStudents: enrollments.length,
+        totalPaid,
+        totalUnpaid: enrollments.length - totalPaid,
+        byFirm,
+      };
+    }
+  }
+
+  async markAllStudentsPaid(simulationId: string, notes?: string): Promise<any> {
+    const simObjectId = this.toObjectId(simulationId);
+
+    const simulation = await this.simulationModel.findById(simObjectId);
+    if (!simulation) {
+      throw new NotFoundException(`Simulation ${simulationId} not found`);
+    }
+
+    const enrollments = await this.enrollmentModel.find({ simulation: simObjectId });
+
+    const now = new Date();
+    const updates = enrollments.map((enrollment) => ({
+      updateOne: {
+        filter: { _id: enrollment._id },
+        update: {
+          $set: {
+            hasPaid: true,
+            paidAt: now,
+            paymentNotes: notes || '',
+          },
+        },
+      },
+    }));
+
+    if (updates.length > 0) {
+      await this.enrollmentModel.bulkWrite(updates);
+    }
+
+    return {
+      success: true,
+      simulationId,
+      message: `Marked ${enrollments.length} students as paid`,
+      markedCount: enrollments.length,
+      timestamp: now,
+    };
+  }
+
+  async markAllStudentsUnpaid(simulationId: string, notes?: string): Promise<any> {
+    const simObjectId = this.toObjectId(simulationId);
+
+    const simulation = await this.simulationModel.findById(simObjectId);
+    if (!simulation) {
+      throw new NotFoundException(`Simulation ${simulationId} not found`);
+    }
+
+    const enrollments = await this.enrollmentModel.find({ simulation: simObjectId });
+
+    const updates = enrollments.map((enrollment) => ({
+      updateOne: {
+        filter: { _id: enrollment._id },
+        update: {
+          $set: {
+            hasPaid: false,
+            paidAt: null,
+            paymentNotes: notes || '',
+          },
+        },
+      },
+    }));
+
+    if (updates.length > 0) {
+      await this.enrollmentModel.bulkWrite(updates);
+    }
+
+    return {
+      success: true,
+      simulationId,
+      message: `Marked ${enrollments.length} students as unpaid`,
+      markedCount: enrollments.length,
+      timestamp: new Date(),
+    };
+  }
+
+  async extendStudentPaymentDate(
+    simulationId: string,
+    enrollmentId: string,
+    extensionDays: number,
+    reason?: string,
+  ): Promise<any> {
+    if (extensionDays <= 0 || extensionDays > 60) {
+      throw new BadRequestException('Extension days must be between 1 and 60');
+    }
+
+    const simObjectId = this.toObjectId(simulationId);
+    const enrollment = await this.enrollmentModel
+      .findOne({
+        _id: this.toObjectId(enrollmentId),
+        simulation: simObjectId,
+      })
+      .populate('user', 'email firstName lastName studentId');
+
+    if (!enrollment) {
+      throw new NotFoundException(`Enrollment ${enrollmentId} not found`);
+    }
+
+    // Calculate new extended date
+    const extensionMs = extensionDays * 86_400_000; // Convert days to milliseconds
+    const now = new Date();
+    const newExtendedDate = new Date(now.getTime() + extensionMs);
+
+    // If no payment due date set yet, use current date as base
+    if (!enrollment.paymentDueDate) {
+      enrollment.paymentDueDate = now;
+    }
+
+    enrollment.paymentExtendedDate = newExtendedDate;
+    enrollment.paymentNotes = reason ? `${enrollment.paymentNotes || ''}${enrollment.paymentNotes ? ' | ' : ''}Extended by ${extensionDays} days: ${reason}` : `${enrollment.paymentNotes || ''}${enrollment.paymentNotes ? ' | ' : ''}Extended by ${extensionDays} days`;
+    await enrollment.save();
+
+    return {
+      success: true,
+      enrollmentId,
+      student: {
+        firstName: (enrollment.user as any)?.firstName,
+        lastName: (enrollment.user as any)?.lastName,
+        email: (enrollment.user as any)?.email,
+      },
+      message: `Payment deadline extended by ${extensionDays} days`,
+      paymentDueDate: enrollment.paymentDueDate,
+      paymentExtendedDate: enrollment.paymentExtendedDate,
+      extensionDays,
+      reason,
+      extendedAt: now,
+    };
   }
 
   // ============================================================================
@@ -4279,7 +5200,19 @@ export class SimulationService {
     const enrollments = await this.enrollmentModel
       .find({
         user: this.toObjectId(studentId),
-        status: { $in: [EnrollmentStatus.ACTIVE, EnrollmentStatus.PENDING] },
+        // Include DROPPED so the student can see what they've been removed from
+        // (the frontend renders DROPPED enrollments with an "access removed"
+        // state instead of a normal launch button). Without DROPPED here the
+        // sim silently disappears from the student's list and they have no
+        // way to reach the AccessRevokedScreen.
+        status: {
+          $in: [
+            EnrollmentStatus.ACTIVE,
+            EnrollmentStatus.PENDING,
+            EnrollmentStatus.DROPPED,
+            EnrollmentStatus.COMPLETED,
+          ],
+        },
       })
       .populate('simulation')
       .populate('firm');
@@ -4299,6 +5232,7 @@ export class SimulationService {
       .map((enrollment) => {
         const firm = enrollment.firm as any;          // null when not yet assigned
         const hasFirmAssignment = !!firm;
+        const isBlocked = enrollment.status === EnrollmentStatus.DROPPED;
 
         return {
           simulation: enrollment.simulation,
@@ -4329,6 +5263,9 @@ export class SimulationService {
             // student dashboard reads this to show "Waiting for firm
             // assignment" instead of a broken cockpit link.
             awaitingFirmAssignment: !hasFirmAssignment,
+            // True when the student has been removed from the sim. Frontend
+            // greys out the entry and shows an "Access removed" badge.
+            isBlocked,
           },
         };
       });
@@ -4381,19 +5318,88 @@ export class SimulationService {
       throw new NotFoundException(`Simulation ${simulationId} not found`);
     }
 
-    // Check if all firms have submitted decisions for current quarter
     const firms = await this.firmModel.find({ simulation: simObjectId });
 
-    const submittedDecisions = await this.decisionModel.countDocuments({
+    // Find which firms haven't submitted. We don't block — we carry forward
+    // their previous quarter's decisions and auto-seed any newly unlocked
+    // modules with sane defaults. Faculty can override this behavior by
+    // passing { strict: true } from the controller.
+    const submittedFirmIds = await this.decisionModel.distinct('firm', {
       simulation: simObjectId,
       quarter: simulation.currentQuarter,
       status: { $in: [DecisionStatus.SUBMITTED, DecisionStatus.PROCESSED] },
     });
+    const submittedSet = new Set(submittedFirmIds.map(id => id.toString()));
 
-    if (submittedDecisions < firms.length) {
-      throw new BadRequestException(
-        `Not all firms have submitted decisions. ${submittedDecisions}/${firms.length} submitted.`,
+    const missingFirms = firms.filter(
+      (f: any) => !submittedSet.has((f._id as any).toString()),
+    );
+    const carryForwardSummary: {
+      firmId: string;
+      firmNumber: number;
+      firmName: string;
+      action: 'CARRY_FORWARD' | 'BASELINE' | 'PROMOTED_DRAFT';
+      newlyUnlockedModules: string[];
+    }[] = [];
+
+    if (missingFirms.length > 0) {
+      console.log(
+        `[advanceQuarter] Q${simulation.currentQuarter}: ${missingFirms.length}/${firms.length} firms missing — carrying forward`,
       );
+
+      // Which modules newly unlocked this quarter? Used to seed defaults
+      // for firms that haven't seen these decisions before.
+      const newlyUnlockedModules = (simulation.moduleSchedule?.modules || [])
+        .filter(m => m.enabled && m.unlocksAtQuarter === simulation.currentQuarter)
+        .map(m => m.moduleId);
+
+      for (const firm of missingFirms) {
+        // Detect what action we're about to take, for the audit summary
+        const existing = await this.decisionModel.findOne({
+          simulation: simObjectId,
+          firm: firm._id,
+          quarter: simulation.currentQuarter,
+        });
+        const prev = await this.decisionModel.findOne({
+          simulation: simObjectId,
+          firm: firm._id,
+          quarter: simulation.currentQuarter - 1,
+        });
+
+        let action: 'CARRY_FORWARD' | 'BASELINE' | 'PROMOTED_DRAFT';
+        if (existing?.status === DecisionStatus.DRAFT) {
+          action = 'PROMOTED_DRAFT';
+        } else if (prev) {
+          action = 'CARRY_FORWARD';
+        } else {
+          action = 'BASELINE';
+        }
+
+        // Reuse existing helper for the heavy lifting
+        await this.carryForwardDecision(
+          simObjectId,
+          (firm as any)._id,
+          simulation.currentQuarter,
+        );
+
+        // Seed defaults for newly unlocked modules
+        if (newlyUnlockedModules.length > 0) {
+          await this.seedDefaultsForNewModules(
+            simObjectId,
+            (firm as any)._id,
+            simulation.currentQuarter,
+            newlyUnlockedModules,
+          );
+        }
+
+        carryForwardSummary.push({
+          firmId: ((firm as any)._id as any).toString(),
+          firmNumber: (firm as any).firmNumber,
+          firmName: (firm as any).name,
+          action,
+          newlyUnlockedModules,
+        });
+      }
     }
 
     // Generate demand data for current quarter if it doesn't exist
@@ -4605,6 +5611,8 @@ export class SimulationService {
       simulationStatus: simulation.status,
       firmCount: firms.length,
       processedResults: quarterResults,
+      carryForwardSummary,
+      autoSubmittedCount: carryForwardSummary.length,
     };
   }
 
@@ -7791,6 +8799,97 @@ export class SimulationService {
    * SUBMITTED rather than being overwritten — student's draft work is not
    * destroyed.
    */
+  /**
+   * Seed sensible defaults on a SUBMITTED decision for modules that newly
+   * unlocked this quarter. Called only when carry-forward couldn't fill these
+   * fields (because the firm has never made a decision for the module).
+   *
+   * The defaults bias toward "safe middle of the road" — enough to keep the
+   * sim running without crashing the engine. Non-submitting teams will be
+   * out-performed by teams that actually engage.
+   */
+  private async seedDefaultsForNewModules(
+    simulationId: Types.ObjectId,
+    firmId: Types.ObjectId,
+    quarter: number,
+    moduleIds: string[],
+  ): Promise<void> {
+    const decision = await this.decisionModel.findOne({
+      simulation: simulationId,
+      firm: firmId,
+      quarter,
+    });
+    if (!decision) return;
+
+    let modified = false;
+
+    for (const moduleId of moduleIds) {
+      switch (moduleId) {
+        case 'ds': {
+          // Demand Science — use the BASELINE forecast (not gut, not model).
+          if (!(decision as any).forecastSource) {
+            (decision as any).forecastSource = 'BASELINE';
+            modified = true;
+          }
+          break;
+        }
+        case 'sa': {
+          // Supplier Analytics — keep current supplier mix. If the team
+          // hadn't picked a mix yet, default to 70/30 global/regional.
+          if ((decision as any).supplierGlobalPct == null) {
+            (decision as any).supplierGlobalPct = 0.7;
+            (decision as any).supplierRegionalPct = 0.3;
+            modified = true;
+          }
+          break;
+        }
+        case 'ci': {
+          // Customer Intelligence — equal weighting across segments.
+          if ((decision as any).segmentChampionsWeight == null) {
+            (decision as any).segmentChampionsWeight = 0.25;
+            (decision as any).segmentGrowthWeight = 0.25;
+            (decision as any).segmentAtRiskWeight = 0.25;
+            (decision as any).segmentOtherWeight = 0.25;
+            modified = true;
+          }
+          break;
+        }
+        case 'nd': {
+          // Network Design — DCs default to CLOSED.
+          if ((decision as any).dcCentralStatus == null) {
+            (decision as any).dcCentralStatus = 'NO';
+            (decision as any).dcWestStatus = 'NO';
+            modified = true;
+          }
+          break;
+        }
+        case 'pi': {
+          // Product Innovation — no new product launches.
+          if ((decision as any).newProductLaunch == null) {
+            (decision as any).newProductLaunch = false;
+            modified = true;
+          }
+          break;
+        }
+        case 'me': {
+          // Market Expansion — no new regions entered.
+          if ((decision as any).expandToNewRegion == null) {
+            (decision as any).expandToNewRegion = false;
+            modified = true;
+          }
+          break;
+        }
+      }
+    }
+
+    if (modified) {
+      await decision.save();
+      console.log(
+        `[seedDefaults] firm=${firmId} Q${quarter}: seeded defaults for [${moduleIds.join(', ')}]`,
+      );
+    }
+  }
+
   private async carryForwardDecision(
     simulationId: Types.ObjectId,
     firmId: Types.ObjectId,
@@ -7871,5 +8970,499 @@ export class SimulationService {
     console.log(
       `[carryForward] firm=${firmId} Q${quarter}: cloned from Q${quarter - 1}`,
     );
+  }
+
+  async getFacultyForSimulation(simulationId: string): Promise<any> {
+    const simObjectId = this.toObjectId(simulationId);
+    const simulation = await this.simulationModel.findById(simObjectId);
+    if (!simulation)
+      throw new NotFoundException(`Simulation ${simulationId} not found`);
+
+    const facultyIds = simulation.facultyIds || [];
+    const faculty = await this.userModel.find({ _id: { $in: facultyIds } });
+
+    return {
+      simulationId,
+      count: faculty.length,
+      faculty: faculty.map((f) => ({
+        id: f._id,
+        email: f.email,
+        firstName: f.firstName,
+        lastName: f.lastName,
+        role: f.role,
+      })),
+    };
+  }
+
+  async addFacultyToSimulation(simulationId: string, email: string): Promise<any> {
+    const simObjectId = this.toObjectId(simulationId);
+    const simulation = await this.simulationModel.findById(simObjectId);
+    if (!simulation)
+      throw new NotFoundException(`Simulation ${simulationId} not found`);
+
+    const user = await this.userModel.findOne({ email });
+    if (!user)
+      throw new NotFoundException(`User with email ${email} not found`);
+
+    if (user.role !== UserRole.FACULTY)
+      throw new BadRequestException(`User ${email} is not a faculty member`);
+
+    // Check if faculty is already added
+    const userObjectId = user._id as Types.ObjectId;
+    if (simulation.facultyIds?.some((id) => String(id) === String(userObjectId))) {
+      throw new BadRequestException(`Faculty ${email} is already added to this simulation`);
+    }
+
+    // Add faculty to simulation
+    if (!simulation.facultyIds) {
+      simulation.facultyIds = [];
+    }
+    simulation.facultyIds.push(userObjectId);
+    await simulation.save();
+
+    return {
+      simulationId,
+      message: `Faculty ${email} added successfully`,
+      faculty: {
+        id: userObjectId,
+        email: user.email,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        role: user.role,
+      },
+    };
+  }
+
+  async deploySimulation(simulationId: string, deploymentType: 'faculty' | 'student' = 'faculty'): Promise<any> {
+    const simObjectId = this.toObjectId(simulationId);
+    const simulation = await this.simulationModel.findById(simObjectId);
+    if (!simulation)
+      throw new NotFoundException(`Simulation ${simulationId} not found`);
+
+    // Check if at least one firm has been allocated
+    const firms = await this.firmModel.find({ simulation: simObjectId });
+    if (!firms || firms.length === 0)
+      throw new BadRequestException('At least one firm must be allocated before deployment');
+
+    if (deploymentType === 'faculty') {
+      // Deploy for Faculty (stage 1)
+      if (simulation.deploymentStatus !== 'NOT_DEPLOYED')
+        throw new BadRequestException('Simulation is already deployed for faculty');
+      
+      simulation.deploymentStatus = 'FACULTY_DEPLOYED';
+      simulation.deployedForFacultyAt = new Date();
+    } else if (deploymentType === 'student') {
+      // Deploy for Student (stage 2) - requires faculty deployment first
+      if (simulation.deploymentStatus !== 'FACULTY_DEPLOYED')
+        throw new BadRequestException('Simulation must be deployed for faculty before deploying for students');
+      
+      simulation.deploymentStatus = 'STUDENT_DEPLOYED';
+      simulation.deployedForStudentAt = new Date();
+    }
+
+    await simulation.save();
+
+    return {
+      simulationId,
+      message: `Simulation deployed for ${deploymentType} successfully`,
+      deploymentStatus: simulation.deploymentStatus,
+      deployedForFacultyAt: simulation.deployedForFacultyAt,
+      deployedForStudentAt: simulation.deployedForStudentAt,
+    };
+  }
+
+  // ============================================================================
+  // BILLING METRICS
+  // ============================================================================
+  // Calculate total billed, received, and pending amounts for a simulation.
+  // Uses a fixed fee per student (default $200). Can be adjusted based on requirements.
+  async getBillingMetrics(simulationId: string, feePerStudent: number = 200): Promise<any> {
+    const simObjectId = this.toObjectId(simulationId);
+
+    const simulation = await this.simulationModel.findById(simObjectId);
+    if (!simulation) {
+      throw new NotFoundException(`Simulation ${simulationId} not found`);
+    }
+
+    const enrollments = await this.enrollmentModel.find({ simulation: simObjectId });
+
+    // Calculate metrics
+    const totalStudents = enrollments.length;
+    const paidStudents = enrollments.filter((e) => e.hasPaid).length;
+    const unpaidStudents = totalStudents - paidStudents;
+
+    const totalBilled = totalStudents * feePerStudent;
+    const receivedAmount = paidStudents * feePerStudent;
+    const pendingAmount = unpaidStudents * feePerStudent;
+
+    return {
+      simulationId,
+      simulationName: simulation.name,
+      feePerStudent,
+      totalStudents,
+      paidStudents,
+      unpaidStudents,
+      totalBilled,
+      receivedAmount,
+      pendingAmount,
+    };
+  }
+
+  // ============================================================================
+  // TEST TEAM PROVISIONING
+  // ============================================================================
+
+  /**
+   * Provision a complete test cohort for a simulation.
+   *
+   * Algorithm:
+   *   1. Load the simulation and its firms.
+   *   2. Find any existing mailinator test users for this simulation
+   *      (matched by email pattern `test-{simId}-*@mailinator.com`).
+   *   3. If existing count < (firms × studentsPerFirm), create new ones with
+   *      sequential numbering, password "test1234" hashed, role STUDENT.
+   *   4. For each user not already enrolled in a firm of this simulation,
+   *      round-robin assign to firms (balancing existing firm sizes).
+   *
+   * Idempotent — running twice with same args reuses users and only enrolls
+   * those who aren't already placed.
+   */
+  /**
+   * Provision a complete test cohort for a simulation.
+   *
+   * Pool model: test users are GLOBAL — emails are test-1@mailinator.com,
+   * test-2@mailinator.com, etc. The pool grows on demand and is shared
+   * across all simulations.
+   *
+   * Algorithm:
+   *   1. Load the simulation and its firms.
+   *   2. Count existing test-N@mailinator.com users globally and find the
+   *      highest N (the "high-water mark" of the pool).
+   *   3. Determine which pool members aren't yet enrolled in THIS simulation —
+   *      these can be immediately enrolled here.
+   *   4. If pool isn't big enough to cover (firms × studentsPerFirm), create
+   *      new test users with sequential numbering starting after the
+   *      high-water mark.
+   *   5. Round-robin enroll into firms, balanced by current firm size.
+   *
+   * Idempotent — running twice with same args reuses users and only enrolls
+   * those who aren't already placed.
+   */
+// REPLACE the existing setupTestTeam method in your simulation.service.ts
+// with this version.
+//
+// Bug fixes:
+//
+//   1. User creation wrote `password: hashedPassword` — the User schema field
+//      is `passwordHash`. Mongoose strict mode silently dropped the unknown
+//      field, so every test user got created without any stored password.
+//      That's why test-1@mailinator.com (and likely test-2, test-3, ...)
+//      can't log in even though they exist in the users collection.
+//
+//   2. Missing `displayName` and `isActive: true`. Your normal register() and
+//      login flow set/check both. Without isActive: true, the login check
+//      `if (!user.isActive)` rejects them as deactivated. Without displayName,
+//      UI fall-back logic shows raw emails.
+//
+//   3. The `existing` user check inside the create loop ran a findOne per
+//      iteration. Cheap enough at small scale but quadratic-ish at large
+//      cohorts. Left as-is since you cap by targetTotal which is usually
+//      small (12-30), but flagging for the future.
+
+async setupTestTeam(simulationId: string, studentsPerFirm: number) {
+  const simObjectId = this.toObjectId(simulationId);
+  const simulation = await this.simulationModel.findById(simObjectId);
+  if (!simulation) {
+    throw new NotFoundException(`Simulation ${simulationId} not found`);
+  }
+
+  const firms = await this.firmModel
+    .find({ simulation: simObjectId })
+    .sort({ firmNumber: 1 });
+  if (firms.length === 0) {
+    throw new BadRequestException(
+      'No firms exist for this simulation. Allocate firms first.',
+    );
+  }
+
+  const targetTotal = firms.length * studentsPerFirm;
+
+  // 1. Find ALL existing test-N@mailinator.com users globally
+  //    Pattern: test-{number}@mailinator.com (e.g. test-1@, test-42@)
+  const emailNumberPattern = /^test-(\d+)@mailinator\.com$/i;
+  const allPoolUsers = await this.userModel
+    .find({ email: { $regex: '^test-\\d+@mailinator\\.com$', $options: 'i' } });
+
+  // Determine the high-water mark — the highest N in use globally
+  let highestN = 0;
+  for (const u of allPoolUsers) {
+    const match = u.email.match(emailNumberPattern);
+    if (match) {
+      const n = parseInt(match[1], 10);
+      if (n > highestN) highestN = n;
+    }
+  }
+
+  // Sort pool by their N so reuse is predictable (test-1, test-2, …)
+  allPoolUsers.sort((a, b) => {
+    const na = parseInt((a.email.match(emailNumberPattern) || ['', '0'])[1], 10);
+    const nb = parseInt((b.email.match(emailNumberPattern) || ['', '0'])[1], 10);
+    return na - nb;
+  });
+
+  // 2. Of the pool users, find ones NOT already enrolled in this sim
+  const existingEnrollmentsThisSim = await this.enrollmentModel.find({
+    simulation: simObjectId,
+    user: { $in: allPoolUsers.map((u) => u._id) },
+  });
+  const alreadyEnrolledHereIds = new Set(
+    existingEnrollmentsThisSim.map((e) => String(e.user)),
+  );
+
+  // 2a. FILTER: split into "properly placed" (has firm) vs "unplaced" (no firm)
+  const properlyPlacedIds = new Set<string>();
+  const unplacedEnrollments: any[] = [];
+  
+  for (const enrollment of existingEnrollmentsThisSim) {
+    if (enrollment.firm) {
+      properlyPlacedIds.add(String(enrollment.user));
+    } else {
+      unplacedEnrollments.push(enrollment);
+    }
+  }
+
+  const availableFromPool = allPoolUsers.filter(
+    (u) => !properlyPlacedIds.has(String(u._id)),
+  );
+
+  // 2b. For unplaced enrollments, we'll assign them to firms below (don't skip them)
+
+  // 2b. REPAIR any existing pool users that are missing passwordHash. These
+  //     are leftovers from the buggy version of this method that wrote to a
+  //     `password` field that didn't exist on the schema. Without this, the
+  //     reused pool users would still fail to log in even after we fix the
+  //     creation path below.
+  const testPassword = 'test1234';
+  const hashedPassword = await bcrypt.hash(testPassword, 10);
+
+  const brokenPoolUsers = availableFromPool.filter(
+    (u: any) => !u.passwordHash,
+  );
+  if (brokenPoolUsers.length > 0) {
+    await this.userModel.updateMany(
+      { _id: { $in: brokenPoolUsers.map((u) => u._id) } },
+      {
+        $set: {
+          passwordHash: hashedPassword,
+          isActive: true,
+          displayName: brokenPoolUsers[0]
+            ? undefined  // set per-user below
+            : undefined,
+        },
+      },
+    );
+    // displayName needs to be per-user. Do it individually since updateMany
+    // doesn't easily reference other fields without an aggregation pipeline.
+    for (const u of brokenPoolUsers) {
+      await this.userModel.updateOne(
+        { _id: u._id },
+        {
+          $set: {
+            displayName: `${u.firstName} ${u.lastName}`.trim(),
+            isActive: true,
+          },
+        },
+      );
+      // Reflect the changes on the in-memory object so the response payload
+      // reports them correctly.
+      (u as any).passwordHash = hashedPassword;
+      (u as any).isActive = true;
+      (u as any).displayName = `${u.firstName} ${u.lastName}`.trim();
+    }
+  }
+
+  // 3. Create additional pool users if we don't have enough available
+  const needed = Math.max(0, targetTotal - availableFromPool.length);
+  let createdCount = 0;
+  const newUsers: any[] = [];
+
+  if (needed > 0) {
+    let n = highestN + 1;
+
+    for (let i = 0; i < needed; i++) {
+      const email = `test-${n}@mailinator.com`;
+
+      // Defensive: skip if somehow already exists (race condition or stale
+      // high-water mark from concurrent runs).
+      const existing = await this.userModel.findOne({ email });
+      if (existing) {
+        // If the pre-existing record is broken (no passwordHash), repair it
+        // before reusing so login works.
+        if (!(existing as any).passwordHash) {
+          existing.passwordHash = hashedPassword;
+          (existing as any).isActive = true;
+          (existing as any).displayName = `${existing.firstName || 'Test'} ${existing.lastName || `Student ${n}`}`.trim();
+          await existing.save();
+        }
+        newUsers.push(existing);
+      } else {
+        const firstName = 'Test';
+        const lastName = `Student ${n}`;
+        const newUser = await this.userModel.create({
+          email,
+          passwordHash: hashedPassword,             // <-- was `password` (broken)
+          firstName,
+          lastName,
+          displayName: `${firstName} ${lastName}`,  // <-- was missing
+          role: UserRole.STUDENT,
+          isActive: true,                           // <-- was missing
+          institutionName: simulation.institutionName,
+        });
+        newUsers.push(newUser);
+        createdCount++;
+      }
+      n++;
+    }
+  }
+
+  // 4. The cohort we'll enroll = available-from-pool + newly-created + unplaced enrollments needing firm assignment
+  // Unplaced enrollments are special: they already have enrollment records, just need firm assignment
+  const cohort = [...availableFromPool, ...newUsers].slice(0, targetTotal);
+  
+  // Track which unplaced enrollments we'll assign (don't assign more than needed)
+  const unplacedToAssign = unplacedEnrollments.slice(0, Math.max(0, targetTotal - cohort.length));
+
+  // 5. Get current firm sizes to balance the new assignments
+  // Count properly placed students (those with existing firm assignments)
+  const firmSizes = await Promise.all(
+    firms.map((f) =>
+      this.enrollmentModel.countDocuments({
+        firm: f._id,
+        status: EnrollmentStatus.ACTIVE,
+      }),
+    ),
+  );
+
+  let enrolledCount = 0;
+  const enrollmentDetails: any[] = [];
+  
+  // First, assign unplaced enrollments to firms (update existing records)
+  for (const enrollment of unplacedToAssign) {
+    // Pick the firm with the smallest current size
+    let minIdx = 0;
+    for (let i = 1; i < firmSizes.length; i++) {
+      if (firmSizes[i] < firmSizes[minIdx]) minIdx = i;
+    }
+    const targetFirm = firms[minIdx];
+
+    // Update the unplaced enrollment with firm assignment
+    await this.enrollmentModel.updateOne(
+      { _id: enrollment._id },
+      {
+        $set: {
+          firm: targetFirm._id,
+          firmNumber: targetFirm.firmNumber,
+          status: EnrollmentStatus.ACTIVE,
+          canSubmitDecisions: true,
+          canViewReports: true,
+          canViewCompetitorData: false,
+          hasPaid: true,
+          paidAt: new Date(),
+          paymentNotes: 'Auto-paid (test team)',
+        },
+      },
+    );
+
+    // Get user info for response
+    const user = allPoolUsers.find((u) => String(u._id) === String(enrollment.user));
+    if (user) {
+      enrollmentDetails.push({
+        email: user.email,
+        firmName: targetFirm.name,
+        firmNumber: targetFirm.firmNumber,
+        status: 'upgraded (was unplaced)',
+      });
+    }
+
+    firmSizes[minIdx]++;
+    enrolledCount++;
+  }
+
+  // Then, create new enrollments for cohort users
+  for (const user of cohort) {
+    // Pick the firm with the smallest current size
+    let minIdx = 0;
+    for (let i = 1; i < firmSizes.length; i++) {
+      if (firmSizes[i] < firmSizes[minIdx]) minIdx = i;
+    }
+    const targetFirm = firms[minIdx];
+
+    await this.enrollmentModel.create({
+      simulation: simObjectId,
+      firm: targetFirm._id,
+      user: user._id,
+      firmNumber: targetFirm.firmNumber,
+      status: EnrollmentStatus.ACTIVE,
+      role: EnrollmentRole.TEAM_MEMBER,
+      canSubmitDecisions: true,
+      canViewReports: true,
+      canViewCompetitorData: false,
+      decisionsSubmitted: 0,
+      hasPaid: true,
+      paidAt: new Date(),
+      paymentNotes: 'Auto-paid (test team)',
+    });
+
+    enrollmentDetails.push({
+      email: user.email,
+      firmName: targetFirm.name,
+      firmNumber: targetFirm.firmNumber,
+    });
+
+    firmSizes[minIdx]++;
+    enrolledCount++;
+  }
+
+  return {
+    simulationId,
+    firmsAllocated: firms.length,
+    studentsPerFirm,
+    studentsCreated: createdCount,
+    studentsReused: availableFromPool.length,
+    studentsRepaired: brokenPoolUsers.length,
+    studentsUpgradedFromUnplaced: unplacedToAssign.length,
+    studentsNewlyEnrolled: enrolledCount,
+    totalEnrolled: cohort.length + unplacedToAssign.length,
+    poolHighWaterMark: highestN + createdCount,
+    password: testPassword,
+    students: cohort.map((u) => ({
+      id: String(u._id),
+      email: u.email,
+      firstName: u.firstName,
+      lastName: u.lastName,
+    })),
+    enrollmentDetails,
+    message:
+      enrolledCount > 0
+        ? `Provisioned ${enrolledCount} test student${enrolledCount === 1 ? '' : 's'} across ${firms.length} firms.${unplacedToAssign.length > 0 ? ` Also upgraded ${unplacedToAssign.length} previously unplaced enrollment${unplacedToAssign.length === 1 ? '' : 's'}.` : ''}`
+        : 'All test students for this simulation are already enrolled.',
+  };
+}
+
+/**
+   * Public entry point for the quarter-tick cron sweeper. Loads the sim and
+   * runs the same expiry/auto-advance path the lazy in-request check uses.
+   *
+   * Kept thin on purpose — all the actual logic lives in checkQuarterExpiry
+   * so the lazy and scheduled paths can't drift apart.
+   *
+   * Returns true if the simulation was advanced, false otherwise.
+   */
+  async autoAdvanceExpiredQuarter(simulationId: string): Promise<boolean> {
+    const simulation = await this.simulationModel.findById(
+      this.toObjectId(simulationId),
+    );
+    if (!simulation) return false;
+    return this.checkQuarterExpiry(simulation);
   }
 }

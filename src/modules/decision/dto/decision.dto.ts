@@ -136,6 +136,9 @@ export class UpdateDecisionDto {
   @IsOptional() @IsNumber() productionP2?: number;
   @IsOptional() @IsNumber() priceP1?: number;
   @IsOptional() @IsNumber() priceP2?: number;
+
+  // Status change (for "reopen & edit" flow)
+  @IsOptional() @IsEnum(['DRAFT', 'SUBMITTED', 'PROCESSED', 'LOCKED']) status?: DecisionStatusStr;
 }
 
 // ============================================================================

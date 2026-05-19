@@ -1,4 +1,10 @@
-import { Injectable, BadRequestException, UnauthorizedException } from '@nestjs/common';
+import {
+  Injectable,
+  BadRequestException,
+  UnauthorizedException,
+  ForbiddenException,
+  NotFoundException,
+} from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
@@ -10,12 +16,22 @@ import { ChangePasswordDto } from './dto/change-password.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
 import { VerifyOtpDto } from './dto/verify-otp.dto';
 import { RequestPasswordResetDto } from './dto/request-password-reset.dto';
-import { User, UserDocument, UserRole } from '@/entities/index.entity';
+import {
+  User,
+  UserDocument,
+  UserRole,
+  Enrollment,
+  EnrollmentDocument,
+  Simulation,
+  SimulationDocument,
+} from '@/entities/index.entity';
 
 @Injectable()
 export class AuthService {
   constructor(
     @InjectModel(User.name) private userModel: Model<UserDocument>,
+    @InjectModel(Enrollment.name) private enrollmentModel: Model<EnrollmentDocument>,
+    @InjectModel(Simulation.name) private simulationModel: Model<SimulationDocument>,
     private jwtService: JwtService,
     private usersService: UsersService,
   ) {}
@@ -363,5 +379,99 @@ export class AuthService {
     const userObj = user.toObject();
     delete userObj.passwordHash;
     return userObj;
+  }
+
+  /**
+   * Impersonate a student (faculty/admin only)
+   * Issues a short-lived JWT for the target user with audit metadata
+   */
+  async impersonateUser(targetUserId: string, facultyUser: any): Promise<any> {
+    // Look up the target user
+    const targetUser = await this.userModel.findById(targetUserId);
+    if (!targetUser) {
+      throw new NotFoundException('Target user not found');
+    }
+    if (targetUser.role !== UserRole.STUDENT) {
+      throw new BadRequestException('Only student accounts can be impersonated');
+    }
+
+    // Resolve the caller's user id
+    const facultyId = facultyUser.id || facultyUser._id || facultyUser.sub;
+    if (!facultyId) {
+      throw new ForbiddenException('Could not identify caller');
+    }
+
+    // Authorization: faculty must share a simulation with this student. Admins skip.
+    if (facultyUser.role !== UserRole.ADMIN) {
+      const targetEnrollments = await this.enrollmentModel
+        .find({ user: targetUser._id })
+        .select('simulation user');
+
+      if (targetEnrollments.length === 0) {
+        // Defensive fallback for the legacy string-stored case
+        const altQuery = await this.enrollmentModel
+          .find({ user: (targetUser._id as Types.ObjectId).toString() } as any)
+          .select('simulation user');
+        if (altQuery.length === 0) {
+          throw new ForbiddenException(
+            'Target student is not enrolled in any simulation',
+          );
+        }
+        targetEnrollments.push(...altQuery);
+      }
+
+      const targetSimIds = targetEnrollments.map(e => e.simulation);
+      const facultyIdObj = new Types.ObjectId(String(facultyId));
+      const sharedSim = await this.simulationModel.findOne({
+        _id: { $in: targetSimIds },
+        $or: [
+          { facultyIds: facultyIdObj },
+          { owner: facultyIdObj },
+        ],
+      });
+
+      if (!sharedSim) {
+        throw new ForbiddenException(
+          'You do not have faculty access to any simulation this student is enrolled in',
+        );
+      }
+    }
+
+    // JWT payload matches the normal login shape (sub/email/role/firstName/lastName)
+    // and adds three audit claims. The audit claims are extra — they don't break
+    // any existing guard since guards only check the standard fields.
+    const payload = {
+      sub: (targetUser._id as Types.ObjectId).toString(),
+      email: targetUser.email,
+      role: targetUser.role,
+      firstName: targetUser.firstName,
+      lastName: targetUser.lastName,
+      // Audit claims
+      impersonated: true,
+      impersonatedBy: facultyId.toString(),
+      impersonatorEmail: facultyUser.email,
+    };
+
+    // Short-lived (1h) — these tokens bypass normal login, so we keep the
+    // exposure window tight. The standard login tokens are 24h.
+    const access_token = this.jwtService.sign(payload, { expiresIn: '1h' });
+
+    // Return shape mirrors login() — same keys, same user shape via the same
+    // sanitizeUser helper. Frontend code that handles login responses works
+    // with this response unchanged.
+    return {
+      message: 'Impersonation token issued',
+      user: this.sanitizeUser(targetUser),
+      access_token,
+      // No refresh token — impersonation sessions don't refresh. When the 1h
+      // token expires, faculty has to start a new impersonation explicitly.
+      impersonation: {
+        impersonatedBy: {
+          id: facultyId.toString(),
+          email: facultyUser.email,
+        },
+        expiresIn: 3600,
+      },
+    };
   }
 }

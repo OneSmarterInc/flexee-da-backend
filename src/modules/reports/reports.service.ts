@@ -37,6 +37,8 @@ import {
   KpiHistoryDocument,
   TenQReport,
   TenQReportDocument,
+  Firm,
+  FirmDocument,
 } from '../../entities/index.entity';
 
 @Injectable()
@@ -46,6 +48,8 @@ export class ReportsService {
     private kpiHistoryModel: Model<KpiHistoryDocument>,
     @InjectModel(TenQReport.name)
     private tenqReportModel: Model<TenQReportDocument>,
+    @InjectModel(Firm.name)
+    private firmModel: Model<FirmDocument>,
   ) {}
 
   // ============================================================================
@@ -309,5 +313,106 @@ export class ReportsService {
         firm: new Types.ObjectId(firmId),
       })
       .sort({ quarter: 1 });
+  }
+
+  // ============================================================================
+  // SIMULATION PERFORMANCE
+  // ============================================================================
+  // Returns the full time-series of KPIs for every firm in a simulation, in
+  // a shape that's easy for charts to consume directly. One DB read for the
+  // KPI history (sorted by quarter), one for firm metadata (name/color/number),
+  // then in-memory grouping.
+
+  async getSimulationPerformance(simulationId: string): Promise<any> {
+    const simId = new Types.ObjectId(simulationId);
+
+    // Pull KPI history sorted by firm then quarter so the groupBy stays cheap
+    const kpis = await this.kpiHistoryModel
+      .find({ simulation: simId })
+      .sort({ firm: 1, quarter: 1 });
+
+    // Firm metadata for display (name, color, firmNumber)
+    const firms = await this.firmModel
+      .find({ simulation: simId })
+      .sort({ firmNumber: 1 });
+
+    // Group KPI rows by firm. Map keyed on string firmId for stable lookups.
+    const byFirm = new Map<string, any[]>();
+    for (const kpi of kpis) {
+      const fid = kpi.firm.toString();
+      if (!byFirm.has(fid)) byFirm.set(fid, []);
+      byFirm.get(fid)!.push({
+        quarter: kpi.quarter,
+        financial: kpi.financial,
+        customer: kpi.customer,
+        operations: kpi.operations,
+        inventory: kpi.inventory,
+        learning: kpi.learning,
+        bsc: kpi.bsc,
+        costs: kpi.costs,
+      });
+    }
+
+    // Build per-firm output. Firms with no KPI rows yet still appear so the
+    // chart legend stays consistent across the run — they just show empty
+    // series. Better than omitting them and having the legend change mid-sim.
+    const firmSeries = firms.map((firm: any) => {
+      const series = byFirm.get(firm._id.toString()) || [];
+      return {
+        firmId: firm._id.toString(),
+        firmNumber: firm.firmNumber,
+        name: firm.name,
+        color: firm.color,
+        series,
+        latest: series.length > 0 ? series[series.length - 1] : null,
+      };
+    });
+
+    // Compute current quarter as max quarter across all KPI rows. We don't
+    // read it off the Simulation entity here because it can drift in edge
+    // cases (sim advanced but engine hasn't materialized the new quarter's
+    // KPIs yet). Using the data we have keeps charts honest.
+    const allQuarters = kpis.map(k => k.quarter);
+    const currentQuarter = allQuarters.length > 0 ? Math.max(...allQuarters) : 0;
+    const totalQuarters = new Set(allQuarters).size;
+
+    // Leaderboard: rank by latest BSC overall (with revenue fallback). Firms
+    // with no data sit at the bottom with score=0 rather than being filtered
+    // out — faculty can still see they exist.
+    const leaderboard = [...firmSeries]
+      .map(f => {
+        const latest = f.latest;
+        return {
+          firmId: f.firmId,
+          firmNumber: f.firmNumber,
+          name: f.name,
+          color: f.color,
+          score: latest?.bsc?.overall ?? 0,
+          grade: latest?.bsc?.grade ?? '—',
+          revenue: latest?.financial?.revenue ?? 0,
+          netIncome: latest?.financial?.netIncome ?? 0,
+          marketShare: latest?.customer?.marketShare ?? 0,
+          csi: latest?.customer?.csi ?? 0,
+          fillRate: latest?.customer?.fillRate ?? 0,
+          hasData: latest != null,
+        };
+      })
+      .sort((a, b) => {
+        // Has-data firms first, then by score desc, then by revenue desc as
+        // tiebreaker so the order is fully deterministic.
+        if (a.hasData !== b.hasData) return a.hasData ? -1 : 1;
+        if (b.score !== a.score) return b.score - a.score;
+        return b.revenue - a.revenue;
+      })
+      .map((f, i) => ({ ...f, rank: i + 1 }));
+
+    return {
+      simulationId,
+      currentQuarter,
+      totalQuarters,
+      firmCount: firms.length,
+      firms: firmSeries,
+      leaderboard,
+    };
   }
 }

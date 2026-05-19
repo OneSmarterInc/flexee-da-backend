@@ -32,6 +32,7 @@ import { EnrollStudentsDto } from './dto/enroll-students.dto';
 import { TriggerEventDto } from './dto/trigger-event.dto';
 import { UpdateFeaturesDto } from './dto/update-features.dto';
 import { QuarterDataVisibilityDto } from './dto/quarter-data-visibility.dto';
+import { BulkDeleteEnrollmentsDto, DeleteEnrollmentResponseDto } from './dto/delete-enrollments.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
@@ -307,6 +308,30 @@ export class SimulationController {
     return this.simulationService.getSimulationEnrollments(simulationId);
   }
 
+  @Get(':simulationId/faculty')
+  @ApiOperation({ summary: 'Get faculty members for a simulation' })
+  @ApiParam({ name: 'simulationId', description: 'Simulation ObjectId' })
+  @ApiResponse({ status: 200, description: 'Faculty members retrieved' })
+  async getFaculty(@Param('simulationId') simulationId: string) {
+    return this.simulationService.getFacultyForSimulation(simulationId);
+  }
+
+  @Post(':simulationId/faculty')
+  @Roles(UserRole.ADMIN, UserRole.FACULTY)
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({ summary: 'Add faculty member to simulation' })
+  @ApiParam({ name: 'simulationId', description: 'Simulation ObjectId' })
+  @ApiResponse({ status: 201, description: 'Faculty member added successfully' })
+  @ApiForbiddenResponse({
+    description: 'Only admins and faculty can add faculty',
+  })
+  async addFaculty(
+    @Param('simulationId') simulationId: string,
+    @Body() body: { email: string },
+  ) {
+    return this.simulationService.addFacultyToSimulation(simulationId, body.email);
+  }
+
   @Delete(':simulationId/enrollments/:enrollmentId/firm')
   @Roles(UserRole.ADMIN, UserRole.FACULTY)
   @HttpCode(HttpStatus.OK)
@@ -326,6 +351,328 @@ export class SimulationController {
       simulationId,
       enrollmentId,
     );
+  }
+
+  @Delete(':simulationId/enrollments/:enrollmentId')
+  @Roles(UserRole.ADMIN, UserRole.FACULTY)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Delete a student enrollment from simulation (enrollment only)',
+    description:
+      'Permanently removes a student enrollment record from the simulation. The student user account remains in the system. This cannot be undone.',
+  })
+  @ApiParam({ name: 'simulationId', description: 'Simulation ObjectId' })
+  @ApiParam({ name: 'enrollmentId', description: 'Enrollment ObjectId' })
+  @ApiResponse({ status: 200, description: 'Student enrollment deleted', type: DeleteEnrollmentResponseDto })
+  async deleteEnrollment(
+    @Param('simulationId') simulationId: string,
+    @Param('enrollmentId') enrollmentId: string,
+  ) {
+    return this.simulationService.deleteEnrollment(simulationId, enrollmentId);
+  }
+
+  @Delete(':simulationId/enrollments/:enrollmentId/with-user')
+  @Roles(UserRole.ADMIN, UserRole.FACULTY)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Delete a student enrollment from simulation AND delete the user account',
+    description:
+      'Permanently removes a student enrollment record from the simulation AND deletes the student user account from the system. This cannot be undone.',
+  })
+  @ApiParam({ name: 'simulationId', description: 'Simulation ObjectId' })
+  @ApiParam({ name: 'enrollmentId', description: 'Enrollment ObjectId' })
+  @ApiResponse({ status: 200, description: 'Student enrollment and user deleted', type: DeleteEnrollmentResponseDto })
+  async deleteEnrollmentWithUser(
+    @Param('simulationId') simulationId: string,
+    @Param('enrollmentId') enrollmentId: string,
+  ) {
+    return this.simulationService.deleteEnrollmentWithUser(simulationId, enrollmentId);
+  }
+
+  @Post(':simulationId/enrollments/bulk-delete')
+  @Roles(UserRole.ADMIN, UserRole.FACULTY)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Bulk delete multiple student enrollments from simulation (enrollments only)',
+    description:
+      'Permanently removes multiple student enrollment records from the simulation. Student user accounts remain in the system. This cannot be undone.',
+  })
+  @ApiParam({ name: 'simulationId', description: 'Simulation ObjectId' })
+  @ApiResponse({ status: 200, description: 'Student enrollments deleted', type: DeleteEnrollmentResponseDto })
+  async bulkDeleteEnrollments(
+    @Param('simulationId') simulationId: string,
+    @Body() dto: BulkDeleteEnrollmentsDto,
+  ) {
+    return this.simulationService.bulkDeleteEnrollments(simulationId, dto.enrollmentIds);
+  }
+
+  @Post(':simulationId/enrollments/bulk-delete-with-users')
+  @Roles(UserRole.ADMIN, UserRole.FACULTY)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Bulk delete multiple student enrollments AND delete user accounts',
+    description:
+      'Permanently removes multiple student enrollment records from the simulation AND deletes the student user accounts from the system. This cannot be undone.',
+  })
+  @ApiParam({ name: 'simulationId', description: 'Simulation ObjectId' })
+  @ApiResponse({ status: 200, description: 'Student enrollments and users deleted', type: DeleteEnrollmentResponseDto })
+  async bulkDeleteEnrollmentsWithUsers(
+    @Param('simulationId') simulationId: string,
+    @Body() dto: BulkDeleteEnrollmentsDto,
+  ) {
+    return this.simulationService.bulkDeleteEnrollmentsWithUsers(simulationId, dto.enrollmentIds);
+  }
+
+  // ============================================================================
+  // STUDENT PAYMENT TRACKING (per-student)
+  // ============================================================================
+
+  @Post(':simulationId/enrollments/:enrollmentId/mark-paid')
+  @Roles(UserRole.ADMIN, UserRole.FACULTY)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Mark a student as paid for this simulation',
+    description: 'Faculty can mark individual students as paid for the simulation',
+  })
+  @ApiParam({ name: 'simulationId', description: 'Simulation ObjectId' })
+  @ApiParam({ name: 'enrollmentId', description: 'Enrollment ObjectId' })
+  @ApiResponse({ status: 200, description: 'Student marked as paid' })
+  async markStudentPaid(
+    @Param('simulationId') simulationId: string,
+    @Param('enrollmentId') enrollmentId: string,
+    @Body() body: { notes?: string },
+  ) {
+    return this.simulationService.markStudentPaid(
+      simulationId,
+      enrollmentId,
+      body.notes,
+    );
+  }
+
+  @Post(':simulationId/enrollments/:enrollmentId/mark-unpaid')
+  @Roles(UserRole.ADMIN, UserRole.FACULTY)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Mark a student as unpaid for this simulation',
+    description: 'Faculty can mark students as unpaid (e.g., reverting a previous paid mark)',
+  })
+  @ApiParam({ name: 'simulationId', description: 'Simulation ObjectId' })
+  @ApiParam({ name: 'enrollmentId', description: 'Enrollment ObjectId' })
+  @ApiResponse({ status: 200, description: 'Student marked as unpaid' })
+  async markStudentUnpaid(
+    @Param('simulationId') simulationId: string,
+    @Param('enrollmentId') enrollmentId: string,
+    @Body() body: { notes?: string },
+  ) {
+    return this.simulationService.markStudentUnpaid(
+      simulationId,
+      enrollmentId,
+      body.notes,
+    );
+  }
+
+  @Get(':simulationId/enrollments/payment-status')
+  @Roles(UserRole.ADMIN, UserRole.FACULTY)
+  @ApiOperation({
+    summary: 'Get payment status of all students in simulation',
+    description: 'Returns list of students with their payment status, grouped by firm or by payment status',
+  })
+  @ApiParam({ name: 'simulationId', description: 'Simulation ObjectId' })
+  @ApiQuery({ name: 'groupBy', required: false, enum: ['firm', 'payment'], description: 'Group results by firm or payment status' })
+  @ApiResponse({ status: 200, description: 'Payment status retrieved' })
+  async getStudentPaymentStatus(
+    @Param('simulationId') simulationId: string,
+    @Query('groupBy') groupBy?: 'firm' | 'payment',
+  ) {
+    return this.simulationService.getStudentPaymentStatus(simulationId, groupBy);
+  }
+
+  @Post(':simulationId/enrollments/mark-all-paid')
+  @Roles(UserRole.ADMIN, UserRole.FACULTY)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Mark all students as paid for this simulation',
+    description: 'Faculty can mark all enrolled students as paid in one action',
+  })
+  @ApiParam({ name: 'simulationId', description: 'Simulation ObjectId' })
+  @ApiResponse({ status: 200, description: 'All students marked as paid' })
+  async markAllStudentsPaid(
+    @Param('simulationId') simulationId: string,
+    @Body() body: { notes?: string },
+  ) {
+    return this.simulationService.markAllStudentsPaid(simulationId, body.notes);
+  }
+
+  @Post(':simulationId/enrollments/mark-all-unpaid')
+  @Roles(UserRole.ADMIN, UserRole.FACULTY)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Mark all students as unpaid for this simulation',
+    description: 'Faculty can mark all enrolled students as unpaid in one action (e.g., to reset status)',
+  })
+  @ApiParam({ name: 'simulationId', description: 'Simulation ObjectId' })
+  @ApiResponse({ status: 200, description: 'All students marked as unpaid' })
+  async markAllStudentsUnpaid(
+    @Param('simulationId') simulationId: string,
+    @Body() body: { notes?: string },
+  ) {
+    return this.simulationService.markAllStudentsUnpaid(simulationId, body.notes);
+  }
+
+  @Get(':simulationId/billing-metrics')
+  @Roles(UserRole.ADMIN, UserRole.FACULTY)
+  @ApiOperation({
+    summary: 'Get billing metrics for a simulation',
+    description: 'Returns total billed, received, and pending amounts based on enrollment count and payment status',
+  })
+  @ApiParam({ name: 'simulationId', description: 'Simulation ObjectId' })
+  @ApiQuery({ name: 'feePerStudent', required: false, description: 'Fee per student in dollars (default: 200)', type: Number })
+  @ApiResponse({ status: 200, description: 'Billing metrics retrieved' })
+  async getBillingMetrics(
+    @Param('simulationId') simulationId: string,
+    @Query('feePerStudent') feePerStudent?: number,
+  ) {
+    return this.simulationService.getBillingMetrics(simulationId, feePerStudent || 200);
+  }
+
+  @Post(':simulationId/enrollments/:enrollmentId/extend-payment-date')
+  @Roles(UserRole.ADMIN, UserRole.FACULTY)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Extend payment deadline for individual student',
+    description: 'Faculty can extend the payment deadline for a specific student by N days',
+  })
+  @ApiParam({ name: 'simulationId', description: 'Simulation ObjectId' })
+  @ApiParam({ name: 'enrollmentId', description: 'Enrollment ObjectId' })
+  @ApiQuery({ name: 'days', required: true, type: Number, description: 'Number of days to extend by (1-60)' })
+  @ApiResponse({ status: 200, description: 'Payment deadline extended' })
+  async extendStudentPaymentDate(
+    @Param('simulationId') simulationId: string,
+    @Param('enrollmentId') enrollmentId: string,
+    @Query('days') days: number,
+    @Body() body: { reason?: string },
+  ) {
+    if (!days || days <= 0) {
+      throw new BadRequestException('Days must be greater than 0');
+    }
+    return this.simulationService.extendStudentPaymentDate(
+      simulationId,
+      enrollmentId,
+      days,
+      body.reason,
+    );
+  }
+
+  // ============================================================================
+  // ENROLLMENT DETAIL & ACCESS CONTROL
+  // ============================================================================
+
+  @Get(':id/enrollments/:enrollmentId')
+  @Roles(UserRole.FACULTY, UserRole.ADMIN)
+  @ApiOperation({
+    summary: 'Get full student enrollment detail',
+    description: 'Retrieve complete enrollment record including payment status, user info, and activity history',
+  })
+  @ApiParam({ name: 'id', description: 'Simulation ObjectId' })
+  @ApiParam({ name: 'enrollmentId', description: 'Enrollment ObjectId' })
+  @ApiResponse({ status: 200, description: 'Enrollment detail retrieved successfully' })
+  async getEnrollmentDetail(
+    @Param('id') simulationId: string,
+    @Param('enrollmentId') enrollmentId: string,
+  ) {
+    return this.simulationService.getEnrollmentDetail(simulationId, enrollmentId);
+  }
+
+  @Post(':id/enrollments/:enrollmentId/block')
+  @Roles(UserRole.FACULTY, UserRole.ADMIN)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Block student access to simulation',
+    description: 'Set enrollment status to DROPPED, preventing student access while leaving user account intact',
+  })
+  @ApiParam({ name: 'id', description: 'Simulation ObjectId' })
+  @ApiParam({ name: 'enrollmentId', description: 'Enrollment ObjectId' })
+  @ApiResponse({ status: 200, description: 'Student access blocked' })
+  async blockEnrollment(
+    @Param('id') simulationId: string,
+    @Param('enrollmentId') enrollmentId: string,
+    @Body() body?: { reason?: string },
+  ) {
+    return this.simulationService.blockEnrollment(simulationId, enrollmentId, body?.reason);
+  }
+
+  @Post(':id/enrollments/:enrollmentId/unblock')
+  @Roles(UserRole.FACULTY, UserRole.ADMIN)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Restore student access to simulation',
+    description: 'Set enrollment status back to ACTIVE, restoring student access',
+  })
+  @ApiParam({ name: 'id', description: 'Simulation ObjectId' })
+  @ApiParam({ name: 'enrollmentId', description: 'Enrollment ObjectId' })
+  @ApiResponse({ status: 200, description: 'Student access restored' })
+  async unblockEnrollment(
+    @Param('id') simulationId: string,
+    @Param('enrollmentId') enrollmentId: string,
+  ) {
+    return this.simulationService.unblockEnrollment(simulationId, enrollmentId);
+  }
+
+  @Post(':id/enrollments/:enrollmentId/reset-password')
+  @Roles(UserRole.FACULTY, UserRole.ADMIN)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Reset student password',
+    description: 'Generate a temporary password and return it once. Faculty shares with student through their own channel.',
+  })
+  @ApiParam({ name: 'id', description: 'Simulation ObjectId' })
+  @ApiParam({ name: 'enrollmentId', description: 'Enrollment ObjectId' })
+  @ApiResponse({ status: 200, description: 'Password reset successful, temporary password returned' })
+  async resetEnrollmentPassword(
+    @Param('id') simulationId: string,
+    @Param('enrollmentId') enrollmentId: string,
+  ) {
+    return this.simulationService.resetEnrollmentPassword(simulationId, enrollmentId);
+  }
+
+  // ============================================================================
+  // ACCESS CONTROL — check if student can view this simulation
+  // ============================================================================
+
+  @Get(':simulationId/my-access')
+  @ApiOperation({ summary: "Get the current user's access status for this sim" })
+  @ApiParam({ name: 'simulationId', description: 'Simulation ObjectId' })
+  @ApiResponse({ status: 200, description: 'Access status returned' })
+  async getMyAccess(
+    @Param('simulationId') simulationId: string,
+    @Req() req: any,
+  ) {
+    // req.user comes from your JWT guard. Adjust the field name (sub, id, _id)
+    // to whatever your guard puts on the request object.
+    const userId = req.user?._id || req.user?.id || req.user?.sub;
+    return this.simulationService.getMyAccessToSimulation(simulationId, userId);
+  }
+
+  // ============================================================================
+  // DEPLOYMENT ENDPOINTS
+  // ============================================================================
+
+  @Post(':simulationId/deploy')
+  @Roles(UserRole.FACULTY, UserRole.ADMIN)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Deploy simulation for Faculty or Student',
+    description: 'Two-stage deployment: (1) Admin deploys for faculty, (2) Faculty deploys for students. Requires payment to be made and firms allocated.',
+  })
+  @ApiParam({ name: 'simulationId', description: 'Simulation ObjectId' })
+  @ApiResponse({ status: 200, description: 'Simulation deployed successfully' })
+  @ApiForbiddenResponse({ description: 'Only faculty and admins can deploy simulations' })
+  async deploySimulation(
+    @Param('simulationId') simulationId: string,
+    @Body() body?: { deploymentType?: 'faculty' | 'student' },
+  ) {
+    const deploymentType = body?.deploymentType || 'faculty';
+    return this.simulationService.deploySimulation(simulationId, deploymentType);
   }
 
   // ============================================================================
@@ -601,6 +948,34 @@ export class SimulationController {
   })
   async advanceQuarter(@Param('simulationId') simulationId: string) {
     return this.simulationService.advanceQuarter(simulationId);
+  }
+
+  @Post(':simulationId/extend-quarter')
+  @Roles(UserRole.ADMIN, UserRole.FACULTY)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Extend a specific quarter deadline',
+    description:
+      'Faculty can extend an individual quarter by N days. All future quarter deadlines are automatically adjusted.',
+  })
+  @ApiParam({ name: 'simulationId', description: 'Simulation ObjectId' })
+  @ApiQuery({ name: 'quarter', required: true, type: Number, description: 'Quarter number to extend' })
+  @ApiQuery({ name: 'days', required: true, type: Number, description: 'Number of days to extend by (1-60)' })
+  @ApiQuery({ name: 'reason', required: false, type: String, description: 'Reason for extension (audit trail)' })
+  @ApiResponse({ status: 200, description: 'Quarter extended successfully' })
+  @ApiForbiddenResponse({
+    description: 'Only admins and faculty can extend quarters',
+  })
+  async extendQuarter(
+    @Param('simulationId') simulationId: string,
+    @Query('quarter') quarter: number,
+    @Query('days') days: number,
+    @Query('reason') reason?: string,
+  ) {
+    if (!quarter || !days) {
+      throw new BadRequestException('quarter and days query parameters are required');
+    }
+    return this.simulationService.extendQuarter(simulationId, quarter, days, reason);
   }
 
   // ============================================================================
@@ -917,5 +1292,47 @@ export class SimulationController {
       firmId,
       req.user._id,
     );
+  }
+
+  // ============================================================================
+  // TEST TEAM PROVISIONING
+  // ============================================================================
+
+  /**
+   * Provision a complete test cohort for this simulation.
+   *
+   * Creates (or reuses) mailinator-domain student accounts and enrolls them
+   * into firms in round-robin order. Intended strictly for faculty/admin
+   * testing before real students are invited. Idempotent.
+   *
+   * Pool model: test users are GLOBAL — emails are test-1@mailinator.com,
+   * test-2@mailinator.com, etc. The pool grows on demand and is shared
+   * across all simulations.
+   *
+   * Body:
+   *   - studentsPerFirm (number, optional, default 2): how many students to
+   *     place in each firm. Must be >= 1 and <= 10.
+   *
+   * Returns:
+   *   { simulationId, firmsAllocated, studentsCreated, studentsReused,
+   *     studentsNewlyEnrolled, totalEnrolled, password, students: [...],
+   *     enrollmentDetails: [...], message }
+   */
+  @Post(':simulationId/setup-test-team')
+  @Roles(UserRole.ADMIN, UserRole.FACULTY)
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({
+    summary: '[TEST] Provision mailinator test students and enroll into firms',
+    description: 'Creates test-N@mailinator.com accounts (global pool) and round-robin enrolls them. For faculty/admin testing only.',
+  })
+  @ApiParam({ name: 'simulationId', description: 'Simulation ObjectId' })
+  @ApiResponse({ status: 201, description: 'Test team provisioned' })
+  @ApiForbiddenResponse({ description: 'Only admins and faculty can run this' })
+  async setupTestTeam(
+    @Param('simulationId') simulationId: string,
+    @Body() body?: { studentsPerFirm?: number },
+  ) {
+    const studentsPerFirm = Math.max(1, Math.min(10, body?.studentsPerFirm ?? 2));
+    return this.simulationService.setupTestTeam(simulationId, studentsPerFirm);
   }
 }

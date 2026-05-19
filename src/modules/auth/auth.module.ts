@@ -8,7 +8,7 @@ import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { LocalStrategy } from './strategies/local.strategy';
-import { User, UserSchema } from '../../entities/index.entity';
+import { User, UserSchema, Enrollment, EnrollmentSchema, Simulation, SimulationSchema } from '../../entities/index.entity';
 
 @Module({
   imports: [
@@ -28,7 +28,11 @@ import { User, UserSchema } from '../../entities/index.entity';
         };
       },
     }),
-    MongooseModule.forFeature([{ name: User.name, schema: UserSchema }]),
+    MongooseModule.forFeature([
+      { name: User.name, schema: UserSchema },
+      { name: Enrollment.name, schema: EnrollmentSchema },
+      { name: Simulation.name, schema: SimulationSchema },
+    ]),
     UsersModule,
   ],
   controllers: [AuthController],

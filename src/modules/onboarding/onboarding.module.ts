@@ -6,6 +6,8 @@ import { OnboardingService } from './onboarding.service';
 import {
   StudentOnboarding,
   StudentOnboardingSchema,
+  RegistrationLink,
+  RegistrationLinkSchema,
   Simulation,
   SimulationSchema,
   User,
@@ -19,6 +21,7 @@ import {
     AuthModule,
     MongooseModule.forFeature([
       { name: StudentOnboarding.name, schema: StudentOnboardingSchema },
+      { name: RegistrationLink.name, schema: RegistrationLinkSchema },
       { name: Simulation.name, schema: SimulationSchema },
       { name: User.name, schema: UserSchema },
       { name: Enrollment.name, schema: EnrollmentSchema },

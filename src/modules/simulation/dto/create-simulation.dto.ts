@@ -102,10 +102,9 @@ export class FeatureTogglesDto {
 }
 
 export class FirmConfigDto {
-  @ApiProperty({ description: 'Firm number (1-6)' })
+  @ApiProperty({ description: 'Firm number' })
   @IsInt()
   @Min(1)
-  @Max(6)
   firmNumber!: number;
 
   @ApiProperty({ description: 'Firm display name' })
@@ -207,7 +206,6 @@ export class CreateSimulationDto {
   @IsOptional()
   @IsInt()
   @Min(2)
-  @Max(6)
   numFirms?: number;
 
   @ApiPropertyOptional({ default: 3, description: 'Number of regions' })
@@ -325,4 +323,27 @@ export class CreateSimulationDto {
   @IsOptional()
   @IsBoolean()
   chartShowsAllFirms?: boolean;
+
+  @ApiPropertyOptional({ default: 30, description: 'Maximum number of students allowed to enroll' })
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(999)
+  enrollmentCapacity?: number;
+
+  @ApiPropertyOptional({
+    default: 'UTC',
+    description: 'IANA timezone identifier for this simulation (e.g., "America/New_York", "Europe/London", "Asia/Tokyo"). Used to calculate when quarters open/close in faculty local time.',
+    example: 'America/New_York',
+  })
+  @IsOptional()
+  @IsString()
+  timezone?: string;
+
+  @ApiPropertyOptional({
+    description: 'Simulation start date. When the first quarter begins. If not provided, defaults to current time when first quarter starts.',
+    example: '2026-06-01T00:00:00Z',
+  })
+  @IsOptional()
+  simulationStartDate?: Date;
 }

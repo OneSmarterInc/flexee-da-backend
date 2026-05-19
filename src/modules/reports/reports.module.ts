@@ -9,6 +9,8 @@ import {
   KpiHistorySchema,
   TenQReport,
   TenQReportSchema,
+  Firm,
+  FirmSchema,
 } from '../../entities/index.entity';
 
 @Module({
@@ -16,6 +18,7 @@ import {
     MongooseModule.forFeature([
       { name: KpiHistory.name, schema: KpiHistorySchema },
       { name: TenQReport.name, schema: TenQReportSchema },
+      { name: Firm.name, schema: FirmSchema },
     ]),
   ],
   controllers: [ReportsController, TenqReportController],

@@ -139,11 +139,24 @@ export class DecisionService {
       throw new NotFoundException(`Decision ${id} not found`);
     }
 
-    if (decision.status !== DecisionStatus.DRAFT) {
-      throw new BadRequestException(
-        `Cannot update decision with status ${decision.status}`,
+    // Guard: PROCESSED/LOCKED decisions can only have status changes (for reopening to DRAFT)
+    if (decision.status === DecisionStatus.PROCESSED || decision.status === DecisionStatus.LOCKED) {
+      const hasDataChanges = Object.entries(dto).some(
+        ([key, value]) => key !== 'status' && value !== undefined
       );
+      if (hasDataChanges) {
+        throw new BadRequestException(
+          `Cannot update decision data with status ${decision.status}. Only reopening (status change to DRAFT) is allowed.`,
+        );
+      }
+      // Prevent status changes to anything other than DRAFT on PROCESSED/LOCKED
+      if (dto.status && dto.status !== DecisionStatus.DRAFT && dto.status !== decision.status) {
+        throw new BadRequestException(
+          `Cannot change status to ${dto.status} from ${decision.status}. Only reopening to DRAFT is allowed.`,
+        );
+      }
     }
+    // DRAFT and SUBMITTED: Allow all changes (data and status)
 
     const sanitizedDto = await this.sanitizeLockedModuleFieldsForSave(dto, {
       simulationId: decision.simulation.toString(),

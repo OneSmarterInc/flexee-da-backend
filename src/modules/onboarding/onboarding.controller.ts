@@ -185,4 +185,76 @@ export class OnboardingController {
 
     res.end(buffer);
   }
+
+  /**
+   * Generate a registration link for a simulation
+   */
+  @Post('registration-link/:simulationId')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.FACULTY, UserRole.ADMIN)
+  @ApiBearerAuth('JWT')
+  @ApiOperation({ summary: 'Generate a shareable registration link for a simulation' })
+  @ApiResponse({ status: 201, description: 'Registration link generated' })
+  async generateRegistrationLink(
+    @Param('simulationId') simulationId: string,
+    @Body() body: { description?: string; maxUses?: number },
+    @CurrentUser() facultyUser: any,
+  ) {
+    return this.onboardingService.generateRegistrationLink(
+      simulationId,
+      facultyUser,
+      body.description,
+      body.maxUses,
+    );
+  }
+
+  /**
+   * Get registration link for a simulation
+   */
+  @Get('registration-link/:simulationId')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.FACULTY, UserRole.ADMIN)
+  @ApiBearerAuth('JWT')
+  @ApiOperation({ summary: 'Get registration link for a simulation' })
+  @ApiResponse({ status: 200, description: 'Registration link details' })
+  async getRegistrationLink(
+    @Param('simulationId') simulationId: string,
+    @CurrentUser() facultyUser: any,
+  ) {
+    return this.onboardingService.getRegistrationLink(simulationId, facultyUser);
+  }
+
+  /**
+   * Register student via registration link (public endpoint)
+   */
+  @Post('register-via-link')
+  @ApiOperation({ summary: 'Register a student using a registration link' })
+  @ApiResponse({ status: 201, description: 'Student registered successfully' })
+  async registerViaLink(
+    @Body() body: {
+      token: string;
+      email: string;
+      firstName: string;
+      lastName: string;
+      password: string;
+    },
+  ) {
+    return this.onboardingService.registerViaLink(
+      body.token,
+      body.email,
+      body.firstName,
+      body.lastName,
+      body.password,
+    );
+  }
+
+  /**
+   * Get details of registration link (before registering)
+   */
+  @Get('registration-link-details/:token')
+  @ApiOperation({ summary: 'Get details of a registration link' })
+  @ApiResponse({ status: 200, description: 'Registration link details' })
+  async getRegistrationLinkDetails(@Param('token') token: string) {
+    return this.onboardingService.getRegistrationLinkDetails(token);
+  }
 }

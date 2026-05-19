@@ -8,6 +8,7 @@ import {
   Req,
   HttpCode,
   HttpStatus,
+  Param,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import { AuthService } from './auth.service';
@@ -19,6 +20,10 @@ import { VerifyOtpDto } from './dto/verify-otp.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
+import { RolesGuard } from './guards/roles.guard';
+import { Roles } from './decorators/roles.decorator';
+import { CurrentUser } from './decorators/current-user.decorator';
+import { UserRole } from '@/entities/index.entity';
 
 @ApiTags('Auth')
 @Controller('auth')
@@ -154,5 +159,30 @@ export class AuthController {
   @ApiResponse({ status: 400, description: 'Invalid input or OTP' })
   async resetPassword(@Body() resetPasswordDto: ResetPasswordDto) {
     return this.authService.resetPassword(resetPasswordDto);
+  }
+
+  /**
+   * Impersonate a student (faculty/admin only)
+   */
+  @Post('impersonate/:userId')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.FACULTY, UserRole.ADMIN)
+  @HttpCode(HttpStatus.CREATED)
+  @ApiBearerAuth('JWT')
+  @ApiOperation({
+    summary: 'Issue a short-lived JWT for a student (faculty/admin only)',
+    description:
+      'Returns a 1-hour JWT for the target student. The token carries an ' +
+      'impersonated=true claim. Used by faculty to view the simulation through ' +
+      'a specific student\'s account for debugging or demos.',
+  })
+  @ApiResponse({ status: 201, description: 'Impersonation token issued' })
+  @ApiResponse({ status: 403, description: 'Caller lacks access to the target user' })
+  @ApiResponse({ status: 404, description: 'Target user not found' })
+  async impersonateUser(
+    @Param('userId') userId: string,
+    @CurrentUser() facultyUser: any,
+  ) {
+    return this.authService.impersonateUser(userId, facultyUser);
   }
 }

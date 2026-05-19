@@ -41,6 +41,7 @@ jobs:
           MAILJET_API_KEY=${{ vars.MAILJET_API_KEY }}
           MAILJET_API_SECRET=${{ vars.MAILJET_API_SECRET }}
           MAIL_FROM_ADDRESS=${{ vars.MAIL_FROM_ADDRESS }}
+          MAIL_FROM_NAME=${{ vars.MAIL_FROM_NAME }}
           EOF
 
       # ----------------------------

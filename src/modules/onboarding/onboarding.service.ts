@@ -3,15 +3,20 @@ import {
   BadRequestException,
   NotFoundException,
   ConflictException,
+  UnauthorizedException,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import * as XLSX from 'xlsx';
+import * as bcrypt from 'bcrypt';
 import { randomUUID } from 'crypto';
 import {
   StudentOnboarding,
   StudentOnboardingDocument,
   InviteStatus,
+  RegistrationLink,
+  RegistrationLinkDocument,
+  RegistrationLinkStatus,
   Simulation,
   SimulationDocument,
   User,
@@ -38,6 +43,8 @@ export class OnboardingService {
   constructor(
     @InjectModel(StudentOnboarding.name)
     private studentOnboardingModel: Model<StudentOnboardingDocument>,
+    @InjectModel(RegistrationLink.name)
+    private registrationLinkModel: Model<RegistrationLinkDocument>,
     @InjectModel(Simulation.name)
     private simulationModel: Model<SimulationDocument>,
     @InjectModel(User.name)
@@ -634,12 +641,18 @@ export class OnboardingService {
     return invites.map((invite: any) => ({
       id: invite._id,
       email: invite.email,
+      inviteToken: invite.inviteToken,         // ← needed by faculty "Copy link"
       status: invite.status,
       invitedBy: invite.invitedBy,
       expiresAt: invite.expiresAt,
       acceptedAt: invite.acceptedAt,
       user: invite.user,
       createdAt: invite.createdAt || new Date(),
+      // Useful extras the frontend already knows how to render
+      bulkImportId: invite.bulkImportId,
+      rowNumber: invite.rowNumber,
+      sentEmailNotification: invite.sentEmailNotification,
+      emailSentAt: invite.emailSentAt,
     }));
   }
 
@@ -758,5 +771,293 @@ export class OnboardingService {
       console.error('Failed to send invite email:', error);
       // Don't throw - invite record still created even if email fails
     }
+  }
+
+  /**
+   * Generate a registration link for a simulation
+   */
+  async generateRegistrationLink(
+    simulationId: string,
+    facultyUser: any,
+    description?: string,
+    maxUses?: number,
+  ): Promise<any> {
+    // Validate simulation exists
+    const simulation = await this.simulationModel.findById(simulationId);
+    if (!simulation) {
+      throw new NotFoundException('Simulation not found');
+    }
+
+    // Check if registration link already exists
+    const existing = await this.registrationLinkModel.findOne({
+      simulation: new Types.ObjectId(simulationId),
+      status: RegistrationLinkStatus.ACTIVE,
+    });
+
+    if (existing) {
+      return {
+        id: existing._id,
+        simulationId: existing.simulation,
+        token: existing.token,
+        status: existing.status,
+        createdAt: existing.createdAt,
+        expiresAt: existing.expiresAt,
+        usedCount: existing.usedCount,
+        maxUses: existing.maxUses,
+        description: existing.description,
+        registrationUrl: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/register?token=${existing.token}`,
+        message: 'Active registration link already exists for this simulation',
+      };
+    }
+
+    // Generate new registration link
+    const token = randomUUID();
+    const newLink = await this.registrationLinkModel.create({
+      simulation: new Types.ObjectId(simulationId),
+      token,
+      status: RegistrationLinkStatus.ACTIVE,
+      createdBy: facultyUser._id,
+      expiresAt: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000),
+      usedCount: 0,
+      maxUses,
+      description,
+    });
+
+    return {
+      id: newLink._id,
+      simulationId: newLink.simulation,
+      token: newLink.token,
+      status: newLink.status,
+      createdAt: newLink.createdAt,
+      expiresAt: newLink.expiresAt,
+      usedCount: newLink.usedCount,
+      maxUses: newLink.maxUses,
+      description: newLink.description,
+      registrationUrl: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/register?token=${token}`,
+    };
+  }
+
+  /**
+   * Get registration link for a simulation
+   */
+  async getRegistrationLink(
+    simulationId: string,
+    facultyUser: any,
+  ): Promise<any> {
+    const simulation = await this.simulationModel.findById(simulationId);
+    if (!simulation) {
+      throw new NotFoundException('Simulation not found');
+    }
+
+    const link = await this.registrationLinkModel.findOne({
+      simulation: new Types.ObjectId(simulationId),
+    });
+
+    if (!link) {
+      return null;
+    }
+
+    return {
+      id: link._id,
+      simulationId: link.simulation,
+      token: link.token,
+      status: link.status,
+      createdAt: link.createdAt,
+      expiresAt: link.expiresAt,
+      usedCount: link.usedCount,
+      maxUses: link.maxUses,
+      description: link.description,
+      registrationUrl: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/register?token=${link.token}`,
+    };
+  }
+
+  /**
+   * Register a student via registration link
+   */
+  async registerViaLink(
+    token: string,
+    email: string,
+    firstName: string,
+    lastName: string,
+    password: string,
+  ): Promise<any> {
+    // ── Validate registration link ───────────────────────────────────────────
+    const regLink = await this.registrationLinkModel.findOne({ token });
+    if (!regLink) {
+      throw new NotFoundException('Invalid registration link');
+    }
+
+    if (regLink.status !== RegistrationLinkStatus.ACTIVE) {
+      throw new BadRequestException(
+        `Registration link is ${regLink.status.toLowerCase()}`,
+      );
+    }
+
+    if (new Date() > regLink.expiresAt) {
+      throw new BadRequestException('Registration link has expired');
+    }
+
+    if (regLink.maxUses && regLink.usedCount >= regLink.maxUses) {
+      throw new BadRequestException('Registration link usage limit reached');
+    }
+
+    // ── Validate simulation ──────────────────────────────────────────────────
+    const simulation = await this.simulationModel.findById(regLink.simulation);
+    if (!simulation) {
+      throw new NotFoundException('Simulation not found');
+    }
+
+    const normalizedEmail = email.toLowerCase();
+
+    // ── Branch on whether user exists ────────────────────────────────────────
+    const existingUser = await this.userModel.findOne({ email: normalizedEmail }).select('+passwordHash');
+
+    let userId: Types.ObjectId;
+    let userPayload: any;
+    let wasExistingUser = false;
+
+    if (existingUser) {
+      // User already has an account. Verify the password they typed against
+      // their stored hash before letting them in. This is the auth check that
+      // protects against someone using a registration link to attach a sim
+      // to an account they don't own.
+      const passwordMatches = await bcrypt.compare(password, existingUser.passwordHash);
+      if (!passwordMatches) {
+        // 401 — they typed an email that exists but the password is wrong.
+        // Frontend should detect this and prompt them to log in and let
+        // their faculty know, OR use the correct password.
+        throw new UnauthorizedException(
+          'This email already has a FLEXEE account. Please enter the password you set when you first registered, or log in and contact your instructor.',
+        );
+      }
+
+      // Password matched — they own this account. Check if they're already
+      // enrolled in this simulation.
+      const existingEnrollment = await this.enrollmentModel.findOne({
+        simulation: regLink.simulation,
+        user: existingUser._id,
+      });
+
+      if (existingEnrollment) {
+        // Idempotent: already in. Don't increment usedCount in this case,
+        // since no new seat is being consumed.
+        return {
+          user: {
+            id: existingUser._id,
+            email: existingUser.email,
+            firstName: existingUser.firstName,
+            lastName: existingUser.lastName,
+          },
+          enrollment: {
+            id: existingEnrollment._id,
+            simulationId: existingEnrollment.simulation,
+            status: existingEnrollment.status,
+          },
+          simulation: {
+            id: simulation._id,
+            name: simulation.name,
+          },
+          alreadyEnrolled: true,
+          message: 'You are already enrolled in this simulation. Please log in.',
+        };
+      }
+
+      userId = existingUser._id as Types.ObjectId;
+      userPayload = {
+        id: existingUser._id,
+        email: existingUser.email,
+        firstName: existingUser.firstName,
+        lastName: existingUser.lastName,
+      };
+      wasExistingUser = true;
+    } else {
+      // No account yet — create one. This is the original new-student path.
+      const hashedPassword = await bcrypt.hash(password, 10);
+
+      const newUser = await this.userModel.create({
+        email: normalizedEmail,
+        firstName,
+        lastName,
+        displayName: `${firstName} ${lastName}`,
+        passwordHash: hashedPassword,
+        role: UserRole.STUDENT,
+        isActive: true,
+      });
+
+      userId = newUser._id as Types.ObjectId;
+      userPayload = {
+        id: newUser._id,
+        email: newUser.email,
+        firstName: newUser.firstName,
+        lastName: newUser.lastName,
+      };
+    }
+
+    // ── Create enrollment (same for both new and existing users) ────────────
+    const enrollment = await this.enrollmentModel.create({
+      simulation: regLink.simulation,
+      user: userId,
+      status: EnrollmentStatus.PENDING,
+      role: EnrollmentRole.TEAM_MEMBER,
+    });
+
+    // ── Increment usage count (only for new enrollments, not re-runs) ───────
+    regLink.usedCount += 1;
+    if (regLink.maxUses && regLink.usedCount >= regLink.maxUses) {
+      regLink.status = RegistrationLinkStatus.DISABLED;
+    }
+    await regLink.save();
+
+    return {
+      user: userPayload,
+      enrollment: {
+        id: enrollment._id,
+        simulationId: enrollment.simulation,
+        status: enrollment.status,
+      },
+      simulation: {
+        id: simulation._id,
+        name: simulation.name,
+      },
+      // wasExistingUser lets the frontend show a slightly different toast
+      // (e.g. "Added to simulation" instead of "Account created")
+      wasExistingUser,
+      message: wasExistingUser
+        ? 'Existing account enrolled in this simulation successfully'
+        : 'Student registered successfully',
+    };
+  }
+
+  /**
+   * Get details of a registration link (before registering)
+   */
+  async getRegistrationLinkDetails(token: string): Promise<any> {
+    const regLink = await this.registrationLinkModel.findOne({ token }).populate('simulation');
+    if (!regLink) {
+      throw new NotFoundException('Invalid registration link');
+    }
+
+    if (regLink.status !== RegistrationLinkStatus.ACTIVE) {
+      throw new BadRequestException(`Registration link is ${regLink.status.toLowerCase()}`);
+    }
+
+    if (new Date() > regLink.expiresAt) {
+      throw new BadRequestException('Registration link has expired');
+    }
+
+    const simulation: any = regLink.simulation;
+
+    return {
+      simulation: {
+        id: simulation._id,
+        name: simulation.name,
+        description: simulation.description,
+      },
+      registrationLink: {
+        status: regLink.status,
+        expiresAt: regLink.expiresAt,
+        remainingUses: regLink.maxUses ? regLink.maxUses - regLink.usedCount : 'unlimited',
+      },
+    };
   }
 }

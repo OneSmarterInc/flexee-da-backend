@@ -1,7 +1,8 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
 import { SimulationController } from './simulation.controller';
 import { SimulationService } from './simulation.service';
+import { QuarterTickService } from './quarter-tick.service';
 import {
   Simulation,
   SimulationSchema,
@@ -59,7 +60,7 @@ import {
     ]),
   ],
   controllers: [SimulationController],
-  providers: [SimulationService],
+  providers: [SimulationService, QuarterTickService],
   exports: [SimulationService],
 })
 export class SimulationModule {}
