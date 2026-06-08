@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
+import * as bcrypt from 'bcrypt';
 
 @Injectable()
 export class UsersService {
@@ -67,6 +68,44 @@ export class UsersService {
       .find({ role: UserRole.ADMIN, isActive: true })
       .sort({ lastName: 1, firstName: 1 })
       .exec();
+  }
+
+  /**
+   * Create a new faculty user (Admin only)
+   */
+  async createFaculty(data: {
+    email: string;
+    password: string;
+    firstName: string;
+    lastName: string;
+    organization?: string;
+    avatarUrl?: string;
+  }): Promise<User> {
+    // Check if user already exists
+    const existingUser = await this.userModel.findOne({
+      email: data.email.toLowerCase(),
+    });
+    if (existingUser) {
+      throw new BadRequestException('Email already registered');
+    }
+
+    // Hash password
+    const hashedPassword = await bcrypt.hash(data.password, 10);
+
+    // Create new faculty user
+    const newFaculty = new this.userModel({
+      email: data.email.toLowerCase(),
+      firstName: data.firstName,
+      lastName: data.lastName,
+      displayName: `${data.firstName} ${data.lastName}`,
+      passwordHash: hashedPassword,
+      role: UserRole.FACULTY,
+      organization: data.organization,
+      avatarUrl: data.avatarUrl,
+      isActive: true,
+    });
+
+    return newFaculty.save();
   }
 
   /**

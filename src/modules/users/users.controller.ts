@@ -1,6 +1,7 @@
 import {
   Controller,
   Get,
+  Post,
   Patch,
   Param,
   Query,
@@ -23,6 +24,7 @@ import { User, UserRole } from '@/entities/index.entity';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
+import { AddFacultyDto } from './dto/add-faculty.dto';
 
 @ApiTags('Users')
 @Controller('users')
@@ -40,6 +42,19 @@ export class UsersController {
   @ApiResponse({ status: 200, description: 'Users retrieved successfully' })
   async findAll(): Promise<User[]> {
     return this.usersService.findAll();
+  }
+
+  /**
+   * Add a new faculty user (Admin only)
+   */
+  @Post()
+  @Roles(UserRole.ADMIN)
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({ summary: 'Add a new faculty user (Admin only)' })
+  @ApiResponse({ status: 201, description: 'Faculty user created successfully' })
+  @ApiResponse({ status: 400, description: 'Invalid input or email already exists' })
+  async addFaculty(@Body() addFacultyDto: AddFacultyDto): Promise<User> {
+    return this.usersService.createFaculty(addFacultyDto);
   }
 
   /**
