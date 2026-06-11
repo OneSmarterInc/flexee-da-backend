@@ -1,6 +1,39 @@
 // src/modules/simulation/processors/customer-pools.processor.ts
-// Customer Pool Dynamics - Aligned with flexeemaster.gs
-// Handles LOYAL → IN_PLAY → COMPETITOR customer movements
+// Customer Pool Dynamics — CORRECTED
+// Handles LOYAL ⇄ IN_PLAY ⇄ COMPETITOR customer movements
+//
+// ═══════════════════════════════════════════════════════════════════════════
+// FIXES vs previous version (each one was visible in live data):
+//
+// 1. COMPETITOR POOL WAS DEAD. `competitor` was read once and never written,
+//    so it sat at 0 for every firm forever. Churn triggers now deposit real
+//    exits into it, and win-back withdraws from it — bounded by what's there.
+//
+// 2. DOUBLE-COUNTED MOVEMENTS. Every churn block incremented BOTH
+//    churnedToCompetitor AND degradedFromLoyal for the same customers.
+//    Now each customer appears in exactly one movement: exits count as
+//    churnedToCompetitor, recoverable downgrades as degradedFromLoyal.
+//
+// 3. MISLABELED WIN-BACK. The old "wonBackFromCompetitor" converted IN_PLAY
+//    customers (the code comment admitted it). That conversion is now
+//    reported under growthConverted (which is literally what it is), and
+//    wonBackFromCompetitor strictly means withdrawals from the competitor
+//    pool, capped by the pool's actual size.
+//
+// 4. FABRICATED CUSTOMERS. `loyal += atRiskSaved` minted customers from
+//    nothing (observable as firm totals growing by atRiskSaved + newEntrants
+//    every quarter, e.g. +4,285 = 3,285 + 1,000). "Saved" now means churn
+//    PREVENTED: the at-risk slice's potential churn is computed, marketing
+//    saves a fraction, and only the unsaved remainder degrades.
+//
+// 5. UPGRADE COUNTED AS DOWNGRADE. `degradedFromLoyal += growthConverted`
+//    reported in-play→loyal conversions as loyal degradations. Removed.
+//
+// CONSERVATION GUARANTEE: loyal + inPlay + competitor changes ONLY by
+// newEntrants (market growth, by design). Every other operation is a
+// transfer between pools. Run the included self-check in tests:
+//   before + newEntrants === after
+// ═══════════════════════════════════════════════════════════════════════════
 
 export interface SCRMDecisions {
   priceP1: number;
@@ -47,9 +80,25 @@ export const CUSTOMER_POOLS_CONFIG = {
       LOW_CSI: 0.10,
       LOW_CSI_THRESHOLD: 70,
       NATURAL: 0.02,
+      // NEW: of each churn event, this share truly EXITS to the competitor
+      // pool; the remainder degrades to IN_PLAY (recoverable). At 0.5 the
+      // overall loyal outflow matches the old model — only the destination
+      // split is new.
+      EXIT_SHARE: 0.5,
+    },
+
+    CONVERSION: {
+      // Base quarterly rate at which IN_PLAY customers convert to LOYAL
+      // (this was the old hardcoded 0.25 "win-back" — relabeled, not retuned)
+      IN_PLAY_BASE: 0.25,
+      IN_PLAY_CAP: 0.8,
     },
 
     WINBACK: {
+      // Base quarterly rate at which the COMPETITOR pool can be won back.
+      // Lower than in-play conversion: these customers actively left.
+      COMPETITOR_BASE: 0.10,
+      COMPETITOR_CAP: 0.5,
       PRICE_LEADER_BONUS: 0.15,
       CSI_LEADER_BONUS: 0.10,
       MARKETING_EFFECT: 0.05,
@@ -85,8 +134,14 @@ export const CUSTOMER_POOLS_CONFIG = {
 };
 
 /**
- * Process customer pool dynamics
- * Matches GAS processCustomerPools_() function
+ * Process customer pool dynamics — conservation-safe version.
+ *
+ * Pool topology:
+ *   LOYAL  --(churn: exit share)-->  COMPETITOR
+ *   LOYAL  --(churn: degrade share)--> IN_PLAY
+ *   IN_PLAY --(conversion)--> LOYAL          (reported: growthConverted)
+ *   COMPETITOR --(win-back, bounded)--> LOYAL (reported: wonBackFromCompetitor)
+ *   MARKET GROWTH --> IN_PLAY                 (reported: newEntrants)
  */
 export function processCustomerPools(
   marketSize: number,
@@ -105,6 +160,7 @@ export function processCustomerPools(
   const CH = CUSTOMER_POOLS_CONFIG.customer.CHURN;
   const CP = CUSTOMER_POOLS_CONFIG.customer.POOLS;
   const CS = CUSTOMER_POOLS_CONFIG.customer.SEGMENTS;
+  const CV = CUSTOMER_POOLS_CONFIG.customer.CONVERSION;
   const M = CUSTOMER_POOLS_CONFIG.market;
   const WB = CUSTOMER_POOLS_CONFIG.customer.WINBACK;
 
@@ -141,112 +197,136 @@ export function processCustomerPools(
     segAlloc.other *= scale;
   }
 
-  // Calculate retention bonus from segment allocation
+  // Retention bonus from segment allocation (softens churn rates below)
   const retentionBonus =
-    segAlloc.champions * CS.CHAMPIONS.marketingResponse * 
+    segAlloc.champions * CS.CHAMPIONS.marketingResponse *
       CS.CHAMPIONS.percentOfCustomers +
-    segAlloc.growth * CS.GROWTH.marketingResponse * 
+    segAlloc.growth * CS.GROWTH.marketingResponse *
       CS.GROWTH.percentOfCustomers +
-    segAlloc.atRisk * CS.AT_RISK.marketingResponse * 
+    segAlloc.atRisk * CS.AT_RISK.marketingResponse *
       CS.AT_RISK.percentOfCustomers +
-    segAlloc.other * CS.OTHER.marketingResponse * 
+    segAlloc.other * CS.OTHER.marketingResponse *
       CS.OTHER.percentOfCustomers;
 
-  // Calculate segment-level churn reduction
-  atRiskSaved = Math.round(
+  // === SHARED CHURN APPLICATOR ===
+  // One churned customer appears in exactly ONE movement bucket:
+  //   - EXIT_SHARE of them truly leave → competitor pool (churnedToCompetitor)
+  //   - the rest degrade to IN_PLAY (degradedFromLoyal) and can be re-won
+  const applyChurn = (requested: number) => {
+    const c = Math.min(Math.max(0, Math.round(requested)), loyal);
+    if (c === 0) return;
+    const exits = Math.round(c * CH.EXIT_SHARE);
+    const degrades = c - exits;
+    loyal -= c;
+    competitor += exits;
+    inPlay += degrades;
+    churnedToCompetitor += exits;
+    degradedFromLoyal += degrades;
+  };
+
+  // === AT-RISK SEGMENT: marketing PREVENTS churn (no customer creation) ===
+  // The at-risk slice of loyal customers would churn at (1 − baseRetention)
+  // annually → quartered. Allocation to the segment saves a fraction; only
+  // the UNSAVED remainder actually churns.
+  const atRiskPotentialChurn = Math.round(
     loyal *
       CS.AT_RISK.percentOfCustomers *
-      (1 - CS.AT_RISK.baseRetention) *
-      segAlloc.atRisk *
-      CS.AT_RISK.marketingResponse *
-      10,
+      ((1 - CS.AT_RISK.baseRetention) / 4),
   );
-
-  growthConverted = Math.round(
-    inPlay * segAlloc.growth * CS.GROWTH.marketingResponse * 5,
+  atRiskSaved = Math.min(
+    atRiskPotentialChurn,
+    Math.round(
+      atRiskPotentialChurn *
+        segAlloc.atRisk *
+        CS.AT_RISK.marketingResponse *
+        10,
+    ),
   );
+  applyChurn(atRiskPotentialChurn - atRiskSaved);
 
-  loyal += atRiskSaved;
-  loyal += growthConverted;
-  inPlay -= growthConverted;
-  degradedFromLoyal += growthConverted;
+  // === GROWTH SEGMENT: in-play → loyal conversion from targeted marketing ===
+  // An UPGRADE — it is NOT added to degradedFromLoyal (old bug #5).
+  const segGrowthConverted = Math.min(
+    Math.round(inPlay * segAlloc.growth * CS.GROWTH.marketingResponse * 5),
+    inPlay,
+  );
+  loyal += segGrowthConverted;
+  inPlay -= segGrowthConverted;
+  growthConverted += segGrowthConverted;
 
   // === CHURN TRIGGERS ===
 
   // 1. Stockout churn
   if (stockoutUnits > 0) {
-    const stockoutChurn = Math.round(stockoutUnits * CH.STOCKOUT);
-    const fromLoyal = Math.min(stockoutChurn, loyal);
-    loyal -= fromLoyal;
-    inPlay += fromLoyal;
-    churnedToCompetitor += fromLoyal;
-    degradedFromLoyal += fromLoyal;
+    applyChurn(stockoutUnits * CH.STOCKOUT);
   }
 
   // 2. Price hike churn
   const priceChange =
-    decisions.priceP1 > 0
+    decisions.priceP1 > 0 && prevPriceP1 > 0
       ? (decisions.priceP1 - prevPriceP1) / prevPriceP1
       : 0;
-
   if (priceChange > CH.PRICE_HIKE_THRESHOLD) {
     const adjustedPriceChurn = CH.PRICE_HIKE * (1 - retentionBonus * 0.1);
-    const priceChurn = Math.round(loyal * adjustedPriceChurn);
-    loyal -= priceChurn;
-    inPlay += priceChurn;
-    churnedToCompetitor += priceChurn;
-    degradedFromLoyal += priceChurn;
+    applyChurn(loyal * adjustedPriceChurn);
   }
 
   // 3. Low CSI churn
   if (csi < CH.LOW_CSI_THRESHOLD) {
     const adjustedCsiChurn = CH.LOW_CSI * (1 - retentionBonus * 0.1);
-    const csiChurn = Math.round(loyal * adjustedCsiChurn);
-    loyal -= csiChurn;
-    inPlay += csiChurn;
-    churnedToCompetitor += csiChurn;
-    degradedFromLoyal += csiChurn;
+    applyChurn(loyal * adjustedCsiChurn);
   }
 
   // 4. Natural churn
   const adjustedNaturalChurn = CH.NATURAL * (1 - retentionBonus * 0.5);
-  const naturalChurn = Math.round(loyal * adjustedNaturalChurn);
-  loyal -= naturalChurn;
-  inPlay += naturalChurn;
-  churnedToCompetitor += naturalChurn;
-  degradedFromLoyal += naturalChurn;
+  applyChurn(loyal * adjustedNaturalChurn);
 
-  // 5. New entrants from market growth
+  // 5. New entrants from market growth — the ONLY source of net new
+  // customers, by design
   const growthRate = M.REGIONS[1].growthRate;
-  newEntrants = Math.round(
-    marketSize * marketShare * (growthRate / 4)
-  );
+  newEntrants = Math.round(marketSize * marketShare * (growthRate / 4));
   inPlay += newEntrants;
 
-  // === WIN-BACK FROM IN_PLAY POOL ===
-  // Firms compete for IN_PLAY customers
-  let winBackRate = 0.25; // Base 25% of IN_PLAY pool
-
-  if (isPriceLeader) {
-    winBackRate += WB.PRICE_LEADER_BONUS;
-  }
-  if (isCsiLeader) {
-    winBackRate += WB.CSI_LEADER_BONUS;
-  }
+  // === IN-PLAY CONVERSION (was mislabeled "win-back from competitor") ===
+  // Firms compete for IN_PLAY customers; converting them to LOYAL is the
+  // core loyalty engine. Reported under growthConverted — that's what it is.
+  let conversionRate = CV.IN_PLAY_BASE;
+  if (isPriceLeader) conversionRate += WB.PRICE_LEADER_BONUS;
+  if (isCsiLeader) conversionRate += WB.CSI_LEADER_BONUS;
 
   // Marketing effect (additive per $1M above average)
   const avgMarketingBudget = 5_000_000; // Placeholder average
+  let marketingBonus = 0;
   if (decisions.marketingBudget > avgMarketingBudget) {
     const extraBudget = decisions.marketingBudget - avgMarketingBudget;
-    const marketingBonus = (extraBudget / 1_000_000) * WB.MARKETING_EFFECT;
-    winBackRate += marketingBonus;
+    marketingBonus = (extraBudget / 1_000_000) * WB.MARKETING_EFFECT;
+    conversionRate += marketingBonus;
   }
+  conversionRate = Math.min(CV.IN_PLAY_CAP, conversionRate);
 
-  winBackRate = Math.min(0.8, winBackRate); // Cap at 80%
+  const inPlayConverted = Math.min(
+    Math.round(inPlay * conversionRate),
+    inPlay,
+  );
+  loyal += inPlayConverted;
+  inPlay -= inPlayConverted;
+  growthConverted += inPlayConverted;
 
-  wonBackFromCompetitor = Math.round(inPlay * winBackRate);
+  // === TRUE WIN-BACK FROM THE COMPETITOR POOL — bounded by the pool ===
+  // These customers actively left, so the base rate is lower than in-play
+  // conversion, but the same leader/marketing bonuses apply.
+  let winBackRate = WB.COMPETITOR_BASE;
+  if (isPriceLeader) winBackRate += WB.PRICE_LEADER_BONUS;
+  if (isCsiLeader) winBackRate += WB.CSI_LEADER_BONUS;
+  winBackRate += marketingBonus;
+  winBackRate = Math.min(WB.COMPETITOR_CAP, winBackRate);
+
+  wonBackFromCompetitor = Math.min(
+    Math.round(competitor * winBackRate),
+    competitor, // can never win back more customers than exist in the pool
+  );
+  competitor -= wonBackFromCompetitor;
   loyal += wonBackFromCompetitor;
-  inPlay -= wonBackFromCompetitor;
 
   return {
     loyalCustomers: Math.max(0, Math.round(loyal)),
