@@ -2867,13 +2867,103 @@ export class SimulationService {
   // KPI HISTORY & BSC SCORING
   // ============================================================================
 
+  // Competitive market share: each firm's relative attractiveness (price,
+  // CSI, marketing, availability) pulls its share toward its fair slice of the
+  // market, smoothed so shares move gradually. Shares always sum to 1.
+  // Mutates results[].marketShare and persists to this quarter's state, which
+  // is what next quarter's demand (totalDemand * marketShare) reads.
+  private async updateMarketShares(
+    simulationId: Types.ObjectId,
+    quarter: number,
+    results: QuarterResult[],
+  ): Promise<void> {
+    if (results.length < 2) return;
+    const S = CONFIG.market.SHARE_DYNAMICS;
+    const P = CONFIG.market.PRODUCTS;
+    const basePrice =
+      P.P1.basePrice * P.P1.marketShare + P.P2.basePrice * P.P2.marketShare;
+    const safe = (v: number, d: number) => (Number.isFinite(v) && v > 0 ? v : d);
+
+    const decisions = await this.decisionModel.find({
+      simulation: simulationId,
+      quarter,
+    });
+    const avgMarketing =
+      results.reduce((a, r) => a + safe(r.marketingCost, 0), 0) /
+      results.length;
+
+    const prevShare = 1 / results.length;
+    const rows = results.map((r) => {
+      const d = decisions.find((x) => (x.firm as Types.ObjectId).equals(r.firmId));
+      const avgPrice = d
+        ? safe(d.priceP1, P.P1.basePrice) * P.P1.marketShare +
+          safe(d.priceP2, P.P2.basePrice) * P.P2.marketShare
+        : basePrice;
+      const priceScore = Math.pow(basePrice / avgPrice, S.PRICE_ELASTICITY);
+      const csiScore = Math.pow(safe(r.csi, 80) / 80, S.CSI_WEIGHT);
+      const mktScore =
+        avgMarketing > 0
+          ? Math.pow(
+              Math.max(0.25, safe(r.marketingCost, 0) / avgMarketing),
+              S.MARKETING_WEIGHT,
+            )
+          : 1;
+      const fill = Math.min(1, Math.max(0, Number(r.fillRate) || 0));
+      const availability = S.FILL_RATE_FLOOR + (1 - S.FILL_RATE_FLOOR) * fill;
+      return {
+        r,
+        score: priceScore * csiScore * mktScore * availability,
+        prev: safe(r.marketShare, prevShare),
+      };
+    });
+
+    const totalScore = rows.reduce((a, x) => a + x.score, 0);
+    if (totalScore <= 0) return;
+
+    let shares = rows.map((x) => {
+      const target = x.score / totalScore;
+      const next = x.prev + S.SMOOTHING * (target - x.prev);
+      return Math.min(S.MAX_SHARE, Math.max(S.MIN_SHARE, next));
+    });
+    const sum = shares.reduce((a, b) => a + b, 0);
+    shares = shares.map((s) => s / sum);
+
+    for (let i = 0; i < rows.length; i++) {
+      rows[i].r.marketShare = shares[i];
+      await this.quarterStateModel.updateOne(
+        { simulation: simulationId, firm: rows[i].r.firmId, quarter },
+        { $set: { marketShare: shares[i] } },
+      );
+    }
+  }
+
   private async recordKpiHistory(
     simulationId: Types.ObjectId,
     firms: FirmDocument[],
     quarter: number,
     results: QuarterResult[],
+    updateMarketShare = false,
   ): Promise<void> {
     const C = CONFIG.costs;
+
+    if (updateMarketShare) {
+      await this.updateMarketShares(simulationId, quarter, results);
+    }
+
+    // Seasonal context for this quarter (used to normalise scorecard targets
+    // and to expose season-adjusted revenue to the dashboard).
+    const demandForQuarter = await this.demandHistoryModel.findOne({
+      simulation: simulationId,
+      quarter,
+    });
+    const seasonalMultiplier = demandForQuarter?.seasonalMultiplier ?? 1;
+    const seasonValues = Object.values(CONFIG.seasonality.QUARTERS) as number[];
+    const seasonAvg =
+      seasonValues.reduce((a, b) => a + b, 0) / seasonValues.length;
+    const seasonIndex =
+      seasonalMultiplier > 0 && seasonAvg > 0
+        ? seasonalMultiplier / seasonAvg
+        : 1;
 
     for (const result of results) {
       const firm = firms.find((f) =>
@@ -2906,12 +2996,22 @@ export class SimulationService {
       });
       const actualMape = forecastLog?.mape ?? 0;
 
-      const bscFinancial = this.calculateFinancialScore(result);
+      const bscFinancial = this.calculateFinancialScore(result, seasonIndex);
       const bscCustomer = this.calculateCustomerScore(result);
       const bscProcess = this.calculateProcessScore(result);
+      const forecastAccuracy = Math.max(0, Math.min(1, 1 - actualMape));
+      const prevForecastLog = await this.forecastLogModel.findOne({
+        simulation: simulationId,
+        firm: result.firmId,
+        quarter: quarter - 1,
+      });
+      const prevForecastAccuracy =
+        prevForecastLog?.mape !== undefined && prevForecastLog?.mape !== null
+          ? Math.max(0, Math.min(1, 1 - prevForecastLog.mape))
+          : null;
       const bscLearning = this.calculateLearningScore(
-        0, // DA: Tech investments not supported
-        result.perfectOrder,
+        forecastAccuracy,
+        prevForecastAccuracy,
       );
       const parts = [bscFinancial, bscCustomer, bscProcess, bscLearning].map(
         (v) => (Number.isFinite(v) ? v : 0),
@@ -2924,6 +3024,10 @@ export class SimulationService {
         quarter,
         financial: {
           revenue: result.revenue,
+          seasonalMultiplier,
+          seasonIndex,
+          seasonAdjustedRevenue:
+            seasonIndex > 0 ? result.revenue / seasonIndex : result.revenue,
           netIncome: result.netIncome,
           cash: result.cash,
           grossMarginPct:
@@ -2967,7 +3071,7 @@ export class SimulationService {
           techSystemsCount: 0, // DA: Tech investments not supported
           scMaturity,
           techInvestmentTotal: 0,
-          forecastAccuracy: 0.8,
+          forecastAccuracy,
         },
         bsc: {
           financial: bscFinancial,
@@ -3018,8 +3122,16 @@ export class SimulationService {
             : 'F';
   }
 
-  private calculateFinancialScore(result: QuarterResult): number {
+  // seasonIndex = this quarter's seasonal multiplier relative to the yearly
+  // average (1.0 = average quarter). Flow targets (revenue, net income) are
+  // scaled by it so a good trough quarter scores like a good peak quarter.
+  private calculateFinancialScore(
+    result: QuarterResult,
+    seasonIndex = 1,
+  ): number {
     const T = CONFIG.scoring.BSC_THRESHOLDS;
+    const revenueTarget = T.REVENUE_TARGET * seasonIndex;
+    const netIncomeTarget = T.NET_INCOME_TARGET * seasonIndex;
     const safe = (v: number) => (Number.isFinite(v) ? v : 0);
 
     const netIncome = safe(result.netIncome);
@@ -3028,12 +3140,12 @@ export class SimulationService {
     const cash = safe(result.cash);
 
     const netIncomePart =
-      netIncome >= T.NET_INCOME_TARGET
+      netIncome >= netIncomeTarget
         ? 30
-        : Math.max(0, (netIncome / T.NET_INCOME_TARGET) * 30);
+        : Math.max(0, (netIncome / netIncomeTarget) * 30);
 
     const revenuePart =
-      revenue >= T.REVENUE_TARGET ? 25 : (revenue / T.REVENUE_TARGET) * 25;
+      revenue >= revenueTarget ? 25 : (revenue / revenueTarget) * 25;
 
     const grossPct = revenue > 0 ? grossProfit / revenue : 0;
     const grossPart =
@@ -3087,7 +3199,12 @@ export class SimulationService {
 
     const perfectOrder = safe(result.perfectOrder);
     const capacityUtilization = safe(result.capacityUtilization);
-    const baseOnTime = safe(CONFIG.perfectOrder.BASE_ON_TIME);
+    // Actual on-time delivery achieved this quarter (falls back to baseline)
+    const baseOnTime = safe(
+      Number.isFinite(result.poOnTime) && result.poOnTime > 0
+        ? result.poOnTime
+        : CONFIG.perfectOrder.BASE_ON_TIME,
+    );
 
     let capScore = 0;
     if (
@@ -3112,19 +3229,29 @@ export class SimulationService {
     return Math.min(100, safe(perfectPart) + capScore + 22 + safe(onTimePart));
   }
 
+  // Learning = how well the firm forecasts and whether it is improving.
+  //   accuracy (1 - MAPE): 0 pts at <=50%, 60 pts at >=90%
+  //   trend vs last quarter's accuracy: 0 pts at -5pp or worse, 20 at flat,
+  //   40 at +5pp or better; 20 when there is no prior quarter. A firm that
+  //   already sits at >=90% accuracy keeps the full 40 (no room to improve).
   private calculateLearningScore(
-    techCount: number,
-    perfectOrder: number,
+    accuracy: number,
+    prevAccuracy: number | null,
   ): number {
     const safeNum = (v: number) => (Number.isFinite(v) ? v : 0);
-    const tech = Math.max(0, Math.floor(safeNum(techCount)));
-    const po = safeNum(perfectOrder);
+    const acc = Math.min(1, Math.max(0, safeNum(accuracy)));
 
-    const techPart = tech >= 4 ? 30 : (tech / 4) * 30;
-    const bonus = tech >= 4 && po > 0.85 ? 20 : tech >= 2 ? 10 : 0;
-    const scaled = (tech * 2) / 3 > 1 ? 20 : ((tech * 2) / 3) * 20;
+    const accPart = Math.min(60, Math.max(0, ((acc - 0.5) / 0.4) * 60));
 
-    return Math.min(100, safeNum(techPart) + 24 + bonus + safeNum(scaled));
+    let trendPart = 20;
+    if (acc >= 0.9) {
+      trendPart = 40;
+    } else if (prevAccuracy !== null && Number.isFinite(prevAccuracy)) {
+      const delta = acc - prevAccuracy;
+      trendPart = Math.min(40, Math.max(0, 20 + (delta / 0.05) * 20));
+    }
+
+    return Math.min(100, accPart + trendPart);
   }
 
   // ============================================================================
@@ -5502,6 +5629,7 @@ export class SimulationService {
         firms,
         simulation.currentQuarter,
         quarterResults.map((qr) => qr.result) as QuarterResult[], // Extract the actual results
+        true,
       );
 
       for (const firmResult of quarterResults) {
@@ -7823,7 +7951,7 @@ export class SimulationService {
       const grossMarginPct = kpi ? (kpi.financial?.grossMarginPct ?? 35) : 35;
       const cashMil = kpi ? (kpi.financial?.cash ?? 0) / 1_000_000 : 0;
 
-      const finScore = Math.min(
+      const finScoreLocal = Math.min(
         100,
         (netIncomeMil > 5 ? 30 : Math.max(0, (netIncomeMil / 5) * 30)) +
           (revenueMil > 70 ? 25 : (revenueMil / 70) * 25) +
@@ -7837,7 +7965,7 @@ export class SimulationService {
       const fillRatePct = kpi ? (kpi.customer?.fillRate ?? 0.9) * 100 : 90;
       const returnRatePct = kpi ? (kpi.customer?.returnRate ?? 0) * 100 : 0;
 
-      const custScore = Math.min(
+      const custScoreLocal = Math.min(
         100,
         (csi > 85 ? 30 : ((csi - 50) / 35) * 30) +
           (marketSharePct > 35 ? 25 : (marketSharePct / 35) * 25) +
@@ -7859,7 +7987,7 @@ export class SimulationService {
             ? (capacityUtilPct / 70) * 25
             : Math.max(0, ((100 - capacityUtilPct) / 15) * 25);
 
-      const procScore = Math.min(
+      const procScoreLocal = Math.min(
         100,
         (perfectOrderPct > 90 ? 30 : (perfectOrderPct / 90) * 30) +
           capScore +
@@ -7877,10 +8005,20 @@ export class SimulationService {
       // Maturity: basic level since no tech
       const maturityLevel = 'Basic';
 
-      const learnScore = Math.min(
+      const learnScoreLocal = Math.min(
         100,
         (forecastAccuracyPct > 85 ? 30 : (forecastAccuracyPct / 85) * 30) + 10,
       );
+
+      // Prefer the scores stored at quarter close (season-adjusted, same
+      // source as the dashboard); the local formulas are only a fallback.
+      const stored = kpi?.bsc as any;
+      const pick = (v: unknown, fallback: number) =>
+        typeof v === 'number' && Number.isFinite(v) ? v : fallback;
+      const finScore = pick(stored?.financial, finScoreLocal);
+      const custScore = pick(stored?.customer, custScoreLocal);
+      const procScore = pick(stored?.process, procScoreLocal);
+      const learnScore = pick(stored?.learning, learnScoreLocal);
 
       // ── OVERALL ────────────────────────────────────────────────────────
       const overall = (finScore + custScore + procScore + learnScore) / 4;

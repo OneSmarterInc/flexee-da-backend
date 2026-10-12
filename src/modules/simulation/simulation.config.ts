@@ -42,6 +42,16 @@ export const CONFIG = {
 
   market: {
     TOTAL_MARKET_SIZE: 600_000,
+    // Competitive share dynamics (applied after each live quarter).
+    SHARE_DYNAMICS: {
+      PRICE_ELASTICITY: 1.5,    // exponent on (basePrice / avgPrice)
+      CSI_WEIGHT: 1.0,          // exponent on (csi / 80)
+      MARKETING_WEIGHT: 0.15,   // exponent on (marketing / peer average)
+      FILL_RATE_FLOOR: 0.5,     // availability = floor + (1 - floor) * fillRate
+      SMOOTHING: 0.35,          // fraction of gap to target closed per quarter
+      MIN_SHARE: 0.10,
+      MAX_SHARE: 0.60,
+    },
     REGIONS: {
       1: { marketShare: 0.4, growthRate: 0.02, name: 'East (Factory)' },
       2: { marketShare: 0.35, growthRate: 0.06, name: 'Central' },
