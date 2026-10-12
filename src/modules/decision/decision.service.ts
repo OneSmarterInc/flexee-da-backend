@@ -214,10 +214,10 @@ export class DecisionService {
     }
 
     const lockedFieldsReset: string[] = [];
-    const prevDecision = await this.decisionModel.findOne({
-      firm: decision.firm,
-      quarter: decision.quarter - 1,
-    });
+    const prevDecision = await this.findPreviousDecision(
+      decision.firm,
+      decision.quarter,
+    );
     const baselineDefaults = this.buildDecisionDefaults(prevDecision);
 
     for (const [moduleId, fields] of Object.entries(MODULE_DECISION_FIELDS)) {
@@ -327,10 +327,10 @@ export class DecisionService {
     });
 
     if (!decision) {
-      const prevDecision = await this.decisionModel.findOne({
-        firm: new Types.ObjectId(firmId),
-        quarter: quarter - 1,
-      });
+      const prevDecision = await this.findPreviousDecision(
+        new Types.ObjectId(firmId),
+        quarter,
+      );
 
       decision = new this.decisionModel({
         simulation: new Types.ObjectId(simulationId),
@@ -394,11 +394,11 @@ export class DecisionService {
       throw new NotFoundException(`Simulation ${opts.simulationId} not found`);
     }
 
-    const prevDecision = await this.decisionModel.findOne({
-      simulation: new Types.ObjectId(opts.simulationId),
-      firm: new Types.ObjectId(opts.firmId),
-      quarter: opts.quarter - 1,
-    });
+    const prevDecision = await this.findPreviousDecision(
+      new Types.ObjectId(opts.firmId),
+      opts.quarter,
+      new Types.ObjectId(opts.simulationId),
+    );
     const baselineDefaults = this.buildDecisionDefaults(prevDecision);
     const sanitized: any = { ...payload };
     const stripped: string[] = [];
@@ -438,11 +438,11 @@ export class DecisionService {
       throw new NotFoundException(`Simulation not found`);
     }
 
-    const prevDecision = await this.decisionModel.findOne({
-      simulation: decision.simulation,
-      firm: decision.firm,
-      quarter: decision.quarter - 1,
-    });
+    const prevDecision = await this.findPreviousDecision(
+      decision.firm,
+      decision.quarter,
+      decision.simulation,
+    );
     const baselineDefaults = this.buildDecisionDefaults(prevDecision);
     const stripped: string[] = [];
 
@@ -931,6 +931,25 @@ export class DecisionService {
   // ============================================================================
   // Carry forward from prev quarter or fall back to schema defaults.
 
+  async getAllForFirm(firmId: string): Promise<DecisionResponseDto[]> {
+    const decisions = await this.decisionModel
+      .find({ firm: new Types.ObjectId(firmId) })
+      .sort({ quarter: 1 });
+    return decisions.map((d) => this.toResponseDto(d));
+  }
+
+  // Most recent decision this firm made BEFORE `quarter` (not just quarter-1),
+  // so a gap in the history never resets the form to hard-coded defaults.
+  private async findPreviousDecision(
+    firm: Types.ObjectId,
+    quarter: number,
+    simulation?: Types.ObjectId,
+  ): Promise<DecisionDocument | null> {
+    const filter: Record<string, any> = { firm, quarter: { $lt: quarter } };
+    if (simulation) filter.simulation = simulation;
+    return this.decisionModel.findOne(filter).sort({ quarter: -1 });
+  }
+
   private buildDecisionDefaults(
     prev: DecisionDocument | null,
   ): Record<string, any> {
@@ -945,7 +964,9 @@ export class DecisionService {
       primarySupplier: prev?.primarySupplier ?? 'SUP001',
       secondarySupplier: prev?.secondarySupplier ?? 'NONE',
       primaryAllocation: prev?.primaryAllocation ?? 100,
-      emergencyRegionalOrder: prev?.emergencyRegionalOrder ?? 0,
+      // One-off purchase: never carried forward, so a past emergency order
+      // is not silently re-executed (and re-charged) every quarter.
+      emergencyRegionalOrder: 0,
       orderGlobal: prev?.orderGlobal ?? 600000,
 
       // Baseline production
@@ -1074,10 +1095,10 @@ export class DecisionService {
       throw new NotFoundException(`Simulation ${simulationId} not found`);
     }
 
-    const prevDecision = await this.decisionModel.findOne({
-      firm: firmId,
-      quarter: quarter - 1,
-    });
+    const prevDecision = await this.findPreviousDecision(
+      new Types.ObjectId(firmId),
+      quarter,
+    );
 
     const decision = await this.decisionModel.findOneAndUpdate(
       {

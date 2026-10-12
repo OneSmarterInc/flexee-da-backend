@@ -9058,12 +9058,15 @@ export class SimulationService {
     }
 
     // No record at all. Pull last quarter's decision and clone it.
+    // Latest earlier decision (not strictly quarter-1) so gaps don't reset
+    // the firm to schema defaults.
     const prev = await this.decisionModel
       .findOne({
         simulation: simulationId,
         firm: firmId,
-        quarter: quarter - 1,
+        quarter: { $lt: quarter },
       })
+      .sort({ quarter: -1 })
       .lean();
 
     if (!prev) {
@@ -9098,6 +9101,8 @@ export class SimulationService {
 
     await this.decisionModel.create({
       ...carryable,
+      // One-off purchase: do not re-execute last quarter's emergency order.
+      emergencyRegionalOrder: 0,
       simulation: simulationId,
       firm: firmId,
       quarter,

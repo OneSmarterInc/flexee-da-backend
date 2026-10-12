@@ -79,6 +79,21 @@ export class DecisionController {
   }
 
   // ============================================================================
+  // GET /api/decisions/firm/:firmId/all
+  // Every decision this firm has made, oldest first (one query). Used by the
+  // decision page's history rail so it does not need one request per quarter.
+  // ============================================================================
+  @Get('firm/:firmId/all')
+  @ApiOperation({
+    summary: 'Get all decisions for a firm',
+    description: 'Returns every decision for the firm across quarters, ordered by quarter ascending.',
+  })
+  @ApiResponse({ status: 200, description: 'Decisions retrieved' })
+  async getAllForFirm(@Param('firmId') firmId: string): Promise<DecisionResponseDto[]> {
+    return this.decisionService.getAllForFirm(firmId);
+  }
+
+  // ============================================================================
   // GET /api/decisions/firm/:firmId/state
   // Get current firm state for Decision Cockpit UI
   // ============================================================================
