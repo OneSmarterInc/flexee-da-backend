@@ -42,6 +42,7 @@ jobs:
           MAILJET_API_SECRET=${{ vars.MAILJET_API_SECRET }}
           MAIL_FROM_ADDRESS=${{ vars.MAIL_FROM_ADDRESS }}
           MAIL_FROM_NAME=${{ vars.MAIL_FROM_NAME }}
+          GIT_COMMIT=${{ github.sha }}
           EOF
 
       # ----------------------------

@@ -11,7 +11,10 @@
     "^.+\\.(t|j)s$": "ts-jest"
   },
   "moduleNameMapper": {
-    "^@/(.*)$": "<rootDir>/../src/$1"
+    "^@/(.*)$": "<rootDir>/../src/$1",
+    "^@modules/(.*)$": "<rootDir>/../src/modules/$1",
+    "^@utils/(.*)$": "<rootDir>/../src/utils/$1",
+    "^src/(.*)$": "<rootDir>/../src/$1"
   },
   "globalSetup": "<rootDir>/jest-global-setup.js",
   "globalTeardown": "<rootDir>/jest-global-teardown.js"
