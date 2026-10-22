@@ -9,6 +9,7 @@ import {
   ForbiddenException,
   ConflictException,
 } from '@nestjs/common';
+import { QuarterCloseLog } from '../reporting/reporting.schemas';
 import {
   addLocalDays,
   isValidTimeZone,
@@ -290,6 +291,8 @@ export class SimulationService {
     private eventImpactModel: Model<EventImpactDocument>,
     @InjectModel(StudentOnboarding.name)
     private studentOnboardingModel: Model<StudentOnboardingDocument>,
+    @InjectModel(QuarterCloseLog.name)
+    private quarterCloseLogModel: Model<QuarterCloseLog>,
   ) {}
 
   // ============================================================================
@@ -5550,7 +5553,9 @@ export class SimulationService {
       );
     }
     try {
-      return await this.processQuarterClose(simulationId);
+      return await this.runLoggedClose(simObjectId, quarter, 'faculty', () =>
+        this.processQuarterClose(simulationId),
+      );
     } catch (err) {
       // The quarter did not move on. If its deadline hasn't passed, students
       // must be able to keep saving, so lift the close mark again.
@@ -5567,6 +5572,86 @@ export class SimulationService {
       throw err;
     } finally {
       await this.releaseQuarterClose(simObjectId, quarter);
+    }
+  }
+
+  /**
+   * Run one quarter close and record it in quarter_close_logs for the
+   * reporting connector: when it started and ended, how many firms had
+   * submitted (counted before any carry-forward) and whether it worked.
+   * The record never blocks the close: a logging failure is only logged.
+   */
+  private async runLoggedClose<T>(
+    simObjectId: Types.ObjectId,
+    quarter: number,
+    source: 'deadline' | 'faculty',
+    close: () => Promise<T>,
+  ): Promise<T> {
+    const startedAt = new Date();
+    let snapshot: {
+      course: string;
+      openedAt: Date | null;
+      deadlineAt: Date | null;
+      firms: number;
+      firmsSubmitted: number;
+    } | null = null;
+    try {
+      const sim = await this.simulationModel
+        .findById(simObjectId)
+        .select('name quarterStartedAt quarterEndsAt')
+        .lean();
+      const firms = await this.firmModel.countDocuments({
+        simulation: simObjectId,
+      });
+      const submitted = await this.decisionModel.distinct('firm', {
+        simulation: simObjectId,
+        quarter,
+        status: { $in: [DecisionStatus.SUBMITTED, DecisionStatus.PROCESSED] },
+      });
+      snapshot = {
+        course: sim?.name ?? '',
+        openedAt: sim?.quarterStartedAt ?? null,
+        deadlineAt: sim?.quarterEndsAt ?? null,
+        firms,
+        firmsSubmitted: submitted.length,
+      };
+    } catch (err) {
+      console.error('[quarter-close-log] could not read the snapshot:', err);
+    }
+
+    let status: 'succeeded' | 'failed' = 'succeeded';
+    try {
+      return await close();
+    } catch (err) {
+      status = 'failed';
+      throw err;
+    } finally {
+      if (snapshot) {
+        const completedAt = new Date();
+        try {
+          await this.quarterCloseLogModel.create({
+            simulationId: simObjectId,
+            course: snapshot.course,
+            quarter,
+            source,
+            status,
+            errorCode: status === 'failed' ? 'other' : null,
+            openedAt: snapshot.openedAt,
+            deadlineAt: snapshot.deadlineAt,
+            startedAt,
+            completedAt,
+            seconds: (completedAt.getTime() - startedAt.getTime()) / 1000,
+            firms: snapshot.firms,
+            firmsSubmitted: snapshot.firmsSubmitted,
+            firmsCarriedForward: Math.max(
+              0,
+              snapshot.firms - snapshot.firmsSubmitted,
+            ),
+          });
+        } catch (err) {
+          console.error('[quarter-close-log] could not record the close:', err);
+        }
+      }
     }
   }
 
@@ -9033,45 +9118,50 @@ export class SimulationService {
     if (!won) return false;
 
     try {
-      // Who's missing?
-      const firms = await this.firmModel.find({ simulation: simObjectId });
-      const submittedFirmIds = await this.decisionModel.distinct('firm', {
-        simulation: simObjectId,
-        quarter: currentQuarter,
-        status: { $in: [DecisionStatus.SUBMITTED, DecisionStatus.PROCESSED] },
-      });
-      const submittedSet = new Set(submittedFirmIds.map((id) => String(id)));
-      const missingFirms = firms.filter(
-        (f) => !submittedSet.has(String(f._id)),
-      );
-
-      if (missingFirms.length > 0) {
-        console.log(
-          `[QuarterExpiry] sim=${simObjectId} Q${currentQuarter} expired with ` +
-            `${missingFirms.length}/${firms.length} firms unsubmitted. ` +
-            `Carrying forward prior-quarter decisions.`,
-        );
-
-        for (const firm of missingFirms) {
-          await this.carryForwardDecision(
-            simObjectId,
-            firm._id as Types.ObjectId,
-            currentQuarter,
+      return await this.runLoggedClose(
+        simObjectId,
+        currentQuarter,
+        'deadline',
+        async () => {
+          // Who's missing?
+          const firms = await this.firmModel.find({ simulation: simObjectId });
+          const submittedFirmIds = await this.decisionModel.distinct('firm', {
+            simulation: simObjectId,
+            quarter: currentQuarter,
+            status: { $in: [DecisionStatus.SUBMITTED, DecisionStatus.PROCESSED] },
+          });
+          const submittedSet = new Set(submittedFirmIds.map((id) => String(id)));
+          const missingFirms = firms.filter(
+            (f) => !submittedSet.has(String(f._id)),
           );
-        }
-      }
 
-      // Now everyone is submitted — advance.
-      try {
-        await this.processQuarterClose(String(simObjectId));
-        return true;
-      } catch (err) {
-        console.error(
-          `[QuarterExpiry] auto-advance failed for sim ${simObjectId}:`,
-          err,
-        );
-        return false;
-      }
+          if (missingFirms.length > 0) {
+            console.log(
+              `[QuarterExpiry] sim=${simObjectId} Q${currentQuarter} expired with ` +
+                `${missingFirms.length}/${firms.length} firms unsubmitted. ` +
+                `Carrying forward prior-quarter decisions.`,
+            );
+
+            for (const firm of missingFirms) {
+              await this.carryForwardDecision(
+                simObjectId,
+                firm._id as Types.ObjectId,
+                currentQuarter,
+              );
+            }
+          }
+
+          // Now everyone is submitted — advance.
+          await this.processQuarterClose(String(simObjectId));
+          return true;
+        },
+      );
+    } catch (err) {
+      console.error(
+        `[QuarterExpiry] auto-advance failed for sim ${simObjectId}:`,
+        err,
+      );
+      return false;
     } finally {
       await this.releaseQuarterClose(simObjectId, currentQuarter);
     }

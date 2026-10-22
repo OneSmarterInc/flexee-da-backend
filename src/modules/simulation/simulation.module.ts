@@ -5,6 +5,12 @@ import { SimulationService } from './simulation.service';
 import { QuarterTickService } from './quarter-tick.service';
 import { CronController } from './cron.controller';
 import {
+  QuarterCloseLog,
+  QuarterCloseLogSchema,
+  SchedulerState,
+  SchedulerStateSchema,
+} from '../reporting/reporting.schemas';
+import {
   Simulation,
   SimulationSchema,
   Firm,
@@ -58,6 +64,8 @@ import {
       { name: SCRMHistory.name, schema: SCRMHistorySchema },
       { name: EventImpact.name, schema: EventImpactSchema },
       { name: StudentOnboarding.name, schema: StudentOnboardingSchema },
+      { name: QuarterCloseLog.name, schema: QuarterCloseLogSchema },
+      { name: SchedulerState.name, schema: SchedulerStateSchema },
     ]),
   ],
   controllers: [SimulationController, CronController],

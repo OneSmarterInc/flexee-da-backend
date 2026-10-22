@@ -23,6 +23,10 @@ import {
   SimulationSchema,
   SimulationStatus,
 } from '../../entities/index.entity';
+import {
+  QuarterCloseLog,
+  QuarterCloseLogSchema,
+} from '../reporting/reporting.schemas';
 import { SimulationService } from './simulation.service';
 
 describeDb('quarter close claim', () => {
@@ -30,6 +34,7 @@ describeDb('quarter close claim', () => {
   let Sim: Model<any>;
   let Dec: Model<any>;
   let FirmModel: Model<any>;
+  let Logs: Model<any>;
   let svc: any;
   let processed: number;
 
@@ -55,6 +60,7 @@ describeDb('quarter close claim', () => {
     Sim = conn.model(Simulation.name, SimulationSchema);
     Dec = conn.model(Decision.name, DecisionSchema);
     FirmModel = conn.model(Firm.name, FirmSchema);
+    Logs = conn.model(QuarterCloseLog.name, QuarterCloseLogSchema);
   });
 
   afterAll(async () => {
@@ -68,6 +74,7 @@ describeDb('quarter close claim', () => {
     svc.simulationModel = Sim;
     svc.decisionModel = Dec;
     svc.firmModel = FirmModel;
+    svc.quarterCloseLogModel = Logs;
     svc.carryForwardDecision = jest.fn().mockResolvedValue(undefined);
     svc.processQuarterClose = jest.fn(async (simId: string) => {
       processed += 1;
@@ -188,5 +195,44 @@ describeDb('quarter close claim', () => {
     await expect(svc.advanceQuarter(String(simId))).rejects.toThrow('boom');
     const d = await Dec.findOne({ quarter: QUARTER }).lean<any>();
     expect(d.quarterClosed).toBe(false);
+  });
+
+  it('records each close for the reporting connector, kept by course name', async () => {
+    const simId = await insertSim();
+    const firm = new Types.ObjectId();
+    await FirmModel.collection.insertMany([
+      { _id: firm, simulation: simId, firmNumber: 1 },
+      { simulation: simId, firmNumber: 2 },
+    ]);
+    await Dec.collection.insertOne({
+      simulation: simId,
+      firm,
+      quarter: QUARTER,
+      status: DecisionStatus.SUBMITTED,
+    });
+    await svc.advanceQuarter(String(simId));
+    const log = await Logs.findOne({ simulationId: simId }).lean<any>();
+    expect(log).toMatchObject({
+      course: 'Close test',
+      quarter: QUARTER,
+      source: 'faculty',
+      status: 'succeeded',
+      firms: 2,
+      firmsSubmitted: 1,
+      firmsCarriedForward: 1,
+    });
+    expect(log.seconds).toBeGreaterThanOrEqual(0);
+
+    // The record outlives the course.
+    await Sim.deleteOne({ _id: simId });
+    await expect(Logs.countDocuments({ simulationId: simId })).resolves.toBe(1);
+  });
+
+  it('records a failed close as failed', async () => {
+    const simId = await insertSim();
+    svc.processQuarterClose = jest.fn().mockRejectedValue(new Error('boom'));
+    await expect(svc.advanceQuarter(String(simId))).rejects.toThrow('boom');
+    const log = await Logs.findOne({ simulationId: simId }).lean<any>();
+    expect(log).toMatchObject({ status: 'failed', errorCode: 'other' });
   });
 });

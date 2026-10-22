@@ -60,6 +60,7 @@ import {
   UserDocument,
 } from '../../entities/index.entity';
 import { formatCourseDateTime } from '../../lib/courseTime';
+import { SchedulerState } from '../reporting/reporting.schemas';
 import { sendQuarterReminderEmail } from '../../utils/email.util';
 
 export type SweepResult = {
@@ -98,7 +99,12 @@ export class QuarterTickService {
     private readonly enrollmentModel: Model<EnrollmentDocument>,
     @InjectModel(User.name)
     private readonly userModel: Model<UserDocument>,
+    @InjectModel(SchedulerState.name)
+    private readonly schedulerStateModel: Model<SchedulerState>,
   ) {}
+
+  /** The scheduler_state key the reporting connector reads. */
+  static readonly SWEEP_KEY = 'quarter-sweep';
 
   /** Send the day-before reminder this long before a quarter closes. */
   static readonly REMINDER_LEAD_HOURS = 24;
@@ -123,6 +129,18 @@ export class QuarterTickService {
    * Vercel's cron through CronController.
    */
   async sweep(): Promise<SweepResult> {
+    // Recorded first, so report_health can tell the schedule is running even
+    // when a sweep finds nothing to do or fails part-way.
+    try {
+      await this.schedulerStateModel.updateOne(
+        { key: QuarterTickService.SWEEP_KEY },
+        { $set: { lastRunAt: new Date() } },
+        { upsert: true },
+      );
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.logger.error(`[quarter-tick] could not record the run: ${message}`);
+    }
     const closes = await this.closeExpiredQuarters();
     const remindersSent = await this.sendDueReminders();
     return { ...closes, remindersSent };
