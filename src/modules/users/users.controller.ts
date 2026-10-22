@@ -212,11 +212,8 @@ export class UsersController {
   @ApiResponse({ status: 200, description: 'User deactivated successfully' })
   @ApiResponse({ status: 400, description: 'Invalid user ID' })
   @ApiResponse({ status: 404, description: 'User not found' })
-  async deactivateUser(
-    @Param('id') id: string,
-    @Req() req: { user?: { _id?: { toString(): string } } },
-  ): Promise<User> {
-    return this.usersService.deactivateUser(id, req.user?._id?.toString());
+  async deactivateUser(@Param('id') id: string): Promise<User> {
+    return this.usersService.deactivateUser(id);
   }
 
   /**

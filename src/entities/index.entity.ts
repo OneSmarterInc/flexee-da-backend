@@ -443,17 +443,6 @@ export class Simulation {
 
   @Prop({ type: Date, default: null })
   lastSweptAt!: Date | null;
-
-  // ── QUARTER CLOSE CLAIM ─────────────────────────────────────────────────
-  // Set while one process closes a quarter. Every close path (the sweep,
-  // the lazy close on page load, the faculty button) must win this claim
-  // first, so a quarter is never processed twice. A claim older than
-  // QUARTER_CLOSE_STALE_MINUTES is treated as dead and can be taken over.
-  @Prop({ type: Number, default: null })
-  closingQuarter!: number | null;
-
-  @Prop({ type: Date, default: null })
-  closingStartedAt!: Date | null;
 }
 
 export const SimulationSchema = SchemaFactory.createForClass(Simulation);
@@ -753,12 +742,6 @@ export class Decision {
   submittedBy?: Types.ObjectId;
 
   @Prop()  submittedAt?: Date;
-
-  // True once the quarter's close has started. Set on every decision of the
-  // quarter by the close, and checked inside the submit and update writes,
-  // so a late save can't land on a quarter that is already closing.
-  @Prop({ type: Boolean, default: false })
-  quarterClosed!: boolean;
   @Prop()  processedAt?: Date;
 
   @Prop({

@@ -26,13 +26,7 @@ if (!MAIL_FROM_ADDRESS) {
   );
 }
 
-// Created on first send, not at import: Mailjet throws when the keys are
-// blank, which stopped the whole backend from starting without email keys.
-let mailjet: ReturnType<typeof Mailjet.apiConnect> | null = null;
-function getMailjet(): ReturnType<typeof Mailjet.apiConnect> {
-  if (!mailjet) mailjet = Mailjet.apiConnect(API_KEY || "", API_SECRET || "");
-  return mailjet;
-}
+const mailjet = Mailjet.apiConnect(API_KEY || "", API_SECRET || "");
 
 /* -------------------------------------------
    EMAIL UI WRAPPER (REUSABLE LAYOUT)
@@ -108,7 +102,7 @@ async function sendEmailViaMailjet(
   }
 
   try {
-    const request = getMailjet().post("send", { version: "v3.1" }).request({
+    const request = mailjet.post("send", { version: "v3.1" }).request({
       Messages: [
         {
           From: {
