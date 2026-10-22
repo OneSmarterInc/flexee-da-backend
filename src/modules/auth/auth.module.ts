@@ -8,7 +8,15 @@ import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { LocalStrategy } from './strategies/local.strategy';
-import { User, UserSchema, Enrollment, EnrollmentSchema, Simulation, SimulationSchema } from '../../entities/index.entity';
+import { jwtSecret } from '../../config/jwt-secret';
+import {
+  User,
+  UserSchema,
+  Enrollment,
+  EnrollmentSchema,
+  Simulation,
+  SimulationSchema,
+} from '../../entities/index.entity';
 
 @Module({
   imports: [
@@ -17,9 +25,12 @@ import { User, UserSchema, Enrollment, EnrollmentSchema, Simulation, SimulationS
       imports: [ConfigModule],
       inject: [ConfigService],
       useFactory: (configService: ConfigService) => {
-        const secret = configService.get<string>('JWT_SECRET') || 'your-secret-key';
+        // Refuses to start without a real secret (V3 F2).
+        const secret = jwtSecret({
+          JWT_SECRET: configService.get<string>('JWT_SECRET'),
+        });
         const expiresIn = configService.get<string>('JWT_EXPIRY') || '24h';
-        
+
         return {
           secret,
           signOptions: {
