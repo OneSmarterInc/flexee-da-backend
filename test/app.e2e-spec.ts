@@ -35,4 +35,19 @@ describe('App (e2e)', () => {
     expect(res.body).toMatchObject({ status: 'ok', sim: 'data_analytics' });
     expect(typeof res.body.commit).toBe('string');
   });
+
+  it('GET /cron/quarter-tick is public but refuses calls without the secret', async () => {
+    const saved = process.env.CRON_SECRET;
+    process.env.CRON_SECRET = 'e2e-secret';
+    try {
+      await request(app.getHttpServer()).get('/cron/quarter-tick').expect(403);
+      const res = await request(app.getHttpServer())
+        .get('/cron/quarter-tick')
+        .set('Authorization', 'Bearer e2e-secret')
+        .expect(200);
+      expect(res.body).toMatchObject({ advanced: 0, remindersSent: 0 });
+    } finally {
+      process.env.CRON_SECRET = saved;
+    }
+  });
 });

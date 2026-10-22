@@ -3,6 +3,7 @@ import { MongooseModule } from '@nestjs/mongoose';
 import { SimulationController } from './simulation.controller';
 import { SimulationService } from './simulation.service';
 import { QuarterTickService } from './quarter-tick.service';
+import { CronController } from './cron.controller';
 import {
   Simulation,
   SimulationSchema,
@@ -59,7 +60,7 @@ import {
       { name: StudentOnboarding.name, schema: StudentOnboardingSchema },
     ]),
   ],
-  controllers: [SimulationController],
+  controllers: [SimulationController, CronController],
   providers: [SimulationService, QuarterTickService],
   exports: [SimulationService],
 })

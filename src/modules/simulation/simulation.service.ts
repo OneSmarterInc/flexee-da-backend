@@ -9,6 +9,11 @@ import {
   ForbiddenException,
   ConflictException,
 } from '@nestjs/common';
+import {
+  addLocalDays,
+  isValidTimeZone,
+  quarterDeadline,
+} from '../../lib/courseTime';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import * as bcrypt from 'bcrypt';
@@ -628,10 +633,19 @@ export class SimulationService {
     userId: string,
     dto: CreateSimulationDto,
   ): Promise<SimulationDocument> {
+    // Every course runs in a time zone chosen when it is created. Never
+    // default it silently: deadlines and reminder emails depend on it.
+    if (!dto.timezone || !isValidTimeZone(dto.timezone)) {
+      throw new BadRequestException(
+        dto.timezone
+          ? `"${dto.timezone}" is not a time zone we know. Choose the course time zone from the list.`
+          : 'Choose the time zone the course runs in. Quarter deadlines use it.',
+      );
+    }
+    const timezone = dto.timezone;
     const totalQuarters = dto.totalQuarters ?? 11;
     const scheduleConfig = this.resolveScheduleConfig(dto, totalQuarters);
     const quarterDurationDays = dto.quarterDurationDays ?? 14;
-    const timezone = dto.timezone ?? 'UTC';
     const simulationStartDate = dto.simulationStartDate ? new Date(dto.simulationStartDate) : null;
 
     // Generate full quarterly schedule starting from the specified start date or now
@@ -639,6 +653,7 @@ export class SimulationService {
       totalQuarters,
       quarterDurationDays,
       simulationStartDate || new Date(),
+      timezone,
     );
 
     const simulation = new this.simulationModel({
@@ -754,9 +769,10 @@ export class SimulationService {
         CONFIG.simulation.PREHISTORY_QUARTERS + 1;
       savedSimulation.status = SimulationStatus.INITIALIZED;
       savedSimulation.quarterStartedAt = new Date();
-      savedSimulation.quarterEndsAt = new Date(
-        savedSimulation.quarterStartedAt.getTime() +
-          savedSimulation.quarterDurationDays * 86_400_000,
+      savedSimulation.quarterEndsAt = quarterDeadline(
+        savedSimulation.quarterStartedAt,
+        savedSimulation.quarterDurationDays,
+        savedSimulation.timezone || 'UTC',
       );
       await savedSimulation.save();
     } catch (error) {
@@ -1626,13 +1642,17 @@ export class SimulationService {
     totalQuarters: number,
     quarterDurationDays: number,
     startDate: Date,
+    timezone: string,
   ): any[] {
     const schedule: any[] = [];
     let currentStart = new Date(startDate);
 
     for (let q = 1; q <= totalQuarters; q++) {
-      const plannedEnd = new Date(
-        currentStart.getTime() + quarterDurationDays * 86_400_000,
+      // Closes at 11:59 PM course time, N calendar days after it opens.
+      const plannedEnd = quarterDeadline(
+        currentStart,
+        quarterDurationDays,
+        timezone,
       );
 
       schedule.push({
@@ -1690,11 +1710,14 @@ export class SimulationService {
       );
     }
 
-    // Extend this quarter
-    const extensionMs = extensionDays * 86_400_000;
+    // Extend this quarter by calendar days in the course time zone, so the
+    // deadline keeps its local time across a daylight-saving change.
+    const tz = simulation.timezone || 'UTC';
     quarterItem.extendedByDays = (quarterItem.extendedByDays || 0) + extensionDays;
-    quarterItem.plannedEndAt = new Date(
-      quarterItem.plannedEndAt.getTime() + extensionMs,
+    quarterItem.plannedEndAt = addLocalDays(
+      quarterItem.plannedEndAt,
+      extensionDays,
+      tz,
     );
     quarterItem.extendedAt = new Date();
     quarterItem.extensionReason = reason || '';
@@ -1707,18 +1730,24 @@ export class SimulationService {
     // Adjust all future quarters (starting from the next one)
     for (let i = extendedQuarterIndex + 1; i < simulation.quarterSchedule.length; i++) {
       const nextQuarter = simulation.quarterSchedule[i];
-      nextQuarter.plannedStartAt = new Date(
-        nextQuarter.plannedStartAt.getTime() + extensionMs,
+      nextQuarter.plannedStartAt = addLocalDays(
+        nextQuarter.plannedStartAt,
+        extensionDays,
+        tz,
       );
-      nextQuarter.plannedEndAt = new Date(
-        nextQuarter.plannedEndAt.getTime() + extensionMs,
+      nextQuarter.plannedEndAt = addLocalDays(
+        nextQuarter.plannedEndAt,
+        extensionDays,
+        tz,
       );
     }
 
     // Update quarterEndsAt if this is the current quarter
     if (simulation.currentQuarter === quarterNumber) {
-      simulation.quarterEndsAt = new Date(
-        simulation.quarterEndsAt!.getTime() + extensionMs,
+      simulation.quarterEndsAt = addLocalDays(
+        simulation.quarterEndsAt!,
+        extensionDays,
+        tz,
       );
     }
 
@@ -3454,9 +3483,10 @@ export class SimulationService {
       }
       // If shortening or extending, recompute the window end. Start stays fixed.
       if (simulation.quarterStartedAt) {
-        simulation.quarterEndsAt = new Date(
-          simulation.quarterStartedAt.getTime() +
-            dto.quarterDurationDays * 86_400_000,
+        simulation.quarterEndsAt = quarterDeadline(
+          simulation.quarterStartedAt,
+          dto.quarterDurationDays,
+          simulation.timezone || 'UTC',
         );
       }
     }
@@ -5832,9 +5862,10 @@ export class SimulationService {
     // at sim creation; this keeps Q2..Qn aligned with the current
     // quarterDurationDays setting (which an admin may have changed).
     simulation.quarterStartedAt = new Date();
-    simulation.quarterEndsAt = new Date(
-      simulation.quarterStartedAt.getTime() +
-        simulation.quarterDurationDays * 86_400_000,
+    simulation.quarterEndsAt = quarterDeadline(
+      simulation.quarterStartedAt,
+      simulation.quarterDurationDays,
+      simulation.timezone || 'UTC',
     );
 
     await simulation.save();

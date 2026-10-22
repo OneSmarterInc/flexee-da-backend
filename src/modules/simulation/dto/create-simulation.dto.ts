@@ -331,12 +331,11 @@ export class CreateSimulationDto {
   @Max(999)
   enrollmentCapacity?: number;
 
-  @ApiPropertyOptional({
-    default: 'UTC',
-    description: 'IANA timezone identifier for this simulation (e.g., "America/New_York", "Europe/London", "Asia/Tokyo"). Used to calculate when quarters open/close in faculty local time.',
+  @ApiProperty({
+    description: 'IANA time zone the course runs in (e.g., "America/New_York", "Europe/London", "Asia/Kolkata"). Required: quarters close at 11:59 PM in this zone, and every time is shown in it. There is no default.',
     example: 'America/New_York',
   })
-  @IsOptional()
+  @IsOptional() // the service refuses a missing or unknown zone with a plain message
   @IsString()
   timezone?: string;
 

@@ -14,12 +14,16 @@
 //   whose quarterEndsAt is in the past and triggers the same advance logic
 //   the lazy path uses.
 //
+// Triggers:
+//   On Vercel (serverless) the @Cron below does not run on a schedule, so
+//   Vercel's own cron calls GET /api/cron/quarter-tick (CronController),
+//   which runs the same sweep(). On a long-running server the @Cron runs
+//   it too. Both are safe together: every close takes the claim in
+//   SimulationService.claimQuarterClose, and reminders take their own.
+//
 // Timezone:
-//   The faculty's chosen timezone is baked into quarterEndsAt at scheduling
-//   time (when the quarter is initialized/advanced, the configured timezone
-//   determines the wall-clock moment that timestamp represents). Storage is
-//   UTC. So this sweeper just compares quarterEndsAt < now() in UTC and the
-//   per-sim timezone selection is honored automatically.
+//   quarterEndsAt is computed on the course calendar (src/lib/courseTime)
+//   and stored in UTC, so comparing it with now() honors the course zone.
 //
 // Concurrency:
 //   Multiple backend instances might run this cron simultaneously (Vercel
@@ -41,10 +45,29 @@ import { Cron, CronExpression } from '@nestjs/schedule';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import {
+  Decision,
+  DecisionDocument,
+  DecisionStatus,
+  Enrollment,
+  EnrollmentDocument,
+  EnrollmentStatus,
+  Firm,
+  FirmDocument,
   Simulation,
   SimulationDocument,
   SimulationStatus,
+  User,
+  UserDocument,
 } from '../../entities/index.entity';
+import { formatCourseDateTime } from '../../lib/courseTime';
+import { sendQuarterReminderEmail } from '../../utils/email.util';
+
+export type SweepResult = {
+  advanced: number;
+  skipped: number;
+  failed: number;
+  remindersSent: number;
+};
 import { SimulationService } from './simulation.service';
 
 @Injectable()
@@ -67,7 +90,18 @@ export class QuarterTickService {
     // this service depends on SimulationService.
     @Inject(forwardRef(() => SimulationService))
     private readonly simulationService: SimulationService,
+    @InjectModel(Firm.name)
+    private readonly firmModel: Model<FirmDocument>,
+    @InjectModel(Decision.name)
+    private readonly decisionModel: Model<DecisionDocument>,
+    @InjectModel(Enrollment.name)
+    private readonly enrollmentModel: Model<EnrollmentDocument>,
+    @InjectModel(User.name)
+    private readonly userModel: Model<UserDocument>,
   ) {}
+
+  /** Send the day-before reminder this long before a quarter closes. */
+  static readonly REMINDER_LEAD_HOURS = 24;
 
   // Every 5 minutes by default. NestJS uses standard cron syntax (sec min h dom mon dow).
   // We use a preset expression for readability — override via env if needed.
@@ -80,7 +114,23 @@ export class QuarterTickService {
     if (process.env.CRON_QUARTER_TICK_ENABLED === 'false') {
       return;
     }
+    await this.sweep();
+  }
 
+  /**
+   * One pass: close every quarter that is past its deadline, then send the
+   * day-before reminders that are due. Called by the @Cron above and by
+   * Vercel's cron through CronController.
+   */
+  async sweep(): Promise<SweepResult> {
+    const closes = await this.closeExpiredQuarters();
+    const remindersSent = await this.sendDueReminders();
+    return { ...closes, remindersSent };
+  }
+
+  private async closeExpiredQuarters(): Promise<
+    Omit<SweepResult, 'remindersSent'>
+  > {
     const now = new Date();
     const staleClaimCutoff = new Date(
       now.getTime() - this.STALE_CLAIM_MINUTES * 60 * 1000,
@@ -102,7 +152,7 @@ export class QuarterTickService {
       .limit(this.BATCH_LIMIT)
       .lean();
 
-    if (candidates.length === 0) return;
+    if (candidates.length === 0) return { advanced: 0, skipped: 0, failed: 0 };
 
     this.logger.log(
       `[quarter-tick] ${candidates.length} simulation(s) past quarter end — sweeping`,
@@ -123,6 +173,107 @@ export class QuarterTickService {
     this.logger.log(
       `[quarter-tick] done — advanced=${advanced} skipped=${skipped} failed=${failed}`,
     );
+    return { advanced, skipped, failed };
+  }
+
+  /**
+   * Email every student whose team hasn't submitted, once per quarter, when
+   * the quarter closes within REMINDER_LEAD_HOURS. The sim is claimed for
+   * the quarter first (reminderSentForQuarter), so two sweeps can't both
+   * send. Returns the number of emails sent.
+   */
+  async sendDueReminders(): Promise<number> {
+    const now = new Date();
+    const horizon = new Date(
+      now.getTime() + QuarterTickService.REMINDER_LEAD_HOURS * 3_600_000,
+    );
+    const due = await this.simulationModel
+      .find({
+        status: SimulationStatus.IN_PROGRESS,
+        quarterEndsAt: { $gt: now, $lte: horizon },
+      })
+      .select('_id currentQuarter reminderSentForQuarter')
+      .limit(this.BATCH_LIMIT)
+      .lean();
+
+    let sent = 0;
+    for (const cand of due) {
+      if (cand.reminderSentForQuarter === cand.currentQuarter) continue;
+      const sim = await this.simulationModel.findOneAndUpdate(
+        {
+          _id: cand._id,
+          currentQuarter: cand.currentQuarter,
+          reminderSentForQuarter: { $ne: cand.currentQuarter },
+        },
+        { $set: { reminderSentForQuarter: cand.currentQuarter } },
+        { new: true },
+      );
+      if (!sim) continue; // another sweep took it
+      try {
+        sent += await this.remindOneSimulation(sim);
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        this.logger.error(
+          `[quarter-tick] sim=${String(sim._id)} reminders failed: ${message}`,
+        );
+      }
+    }
+    return sent;
+  }
+
+  private async remindOneSimulation(sim: SimulationDocument): Promise<number> {
+    const quarter = sim.currentQuarter;
+    const firms = await this.firmModel
+      .find({ simulation: sim._id })
+      .select('_id')
+      .lean();
+    const submitted = await this.decisionModel.distinct('firm', {
+      simulation: sim._id,
+      quarter,
+      status: { $in: [DecisionStatus.SUBMITTED, DecisionStatus.PROCESSED] },
+    });
+    const done = new Set(submitted.map((id) => String(id)));
+    const waitingFirmIds = firms
+      .map((f) => f._id as Types.ObjectId)
+      .filter((id) => !done.has(id.toHexString()));
+    if (waitingFirmIds.length === 0) return 0;
+
+    const enrollments = await this.enrollmentModel
+      .find({
+        simulation: sim._id,
+        firm: { $in: waitingFirmIds },
+        status: EnrollmentStatus.ACTIVE,
+        canSubmitDecisions: true,
+      })
+      .select('user')
+      .lean();
+    const users = await this.userModel
+      .find({ _id: { $in: enrollments.map((e) => e.user) }, isActive: true })
+      .select('email firstName')
+      .lean();
+
+    const closesAt = formatCourseDateTime(
+      sim.quarterEndsAt!,
+      sim.timezone || 'UTC',
+    );
+    const link = `${process.env.FRONTEND_URL || ''}/dashboard/student`;
+    let sent = 0;
+    for (const u of users) {
+      if (!u.email) continue;
+      const ok = await sendQuarterReminderEmail(
+        u.email,
+        u.firstName,
+        sim.name,
+        quarter,
+        closesAt,
+        link,
+      );
+      if (ok) sent += 1;
+    }
+    this.logger.log(
+      `[quarter-tick] sim=${String(sim._id)} Q${quarter} reminders sent=${sent} of ${users.length}`,
+    );
+    return sent;
   }
 
   /**
