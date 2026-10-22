@@ -36,7 +36,6 @@ import {
   Injectable,
   NotFoundException,
   BadRequestException,
-  ConflictException,
   Logger,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
@@ -51,7 +50,6 @@ import {
   QuarterStateDocument,
   Simulation,
   SimulationDocument,
-  SimulationStatus,
   Enrollment,
   EnrollmentDocument,
   User,
@@ -70,10 +68,6 @@ import {
 } from './dto/decision.dto';
 import { SimulationService } from '../simulation/simulation.service';
 import { MODULE_DECISION_FIELDS } from '../../lib/moduleDecisionMap';
-
-// Shown to students when a save arrives after the quarter's deadline.
-const QUARTER_CLOSED_MESSAGE = (quarter: number) =>
-  `Quarter ${quarter} has closed, so this change was not saved. Reload the page to see the results and the next quarter.`;
 
 @Injectable()
 export class DecisionService {
@@ -96,41 +90,6 @@ export class DecisionService {
   ) {}
 
   // ============================================================================
-  // QUARTER CHECK — a decision can only change while its quarter is open
-  // ============================================================================
-
-  /**
-   * Refuse a save or submit unless `quarter` is the simulation's open
-   * quarter. This is the early check with a clear message; the submit and
-   * update writes also carry `quarterClosed: { $ne: true }` in their filter,
-   * which is the check that holds if a close starts in between.
-   */
-  private async assertQuarterOpen(
-    simulationId: Types.ObjectId | string,
-    quarter: number,
-  ): Promise<void> {
-    const sim = await this.simulationModel
-      .findById(simulationId)
-      .select('currentQuarter status quarterEndsAt closingQuarter')
-      .lean();
-    if (!sim) {
-      throw new NotFoundException(`Simulation not found`);
-    }
-    if (quarter !== sim.currentQuarter) {
-      throw new BadRequestException(
-        `This decision is for Quarter ${quarter}, but the open quarter is Quarter ${sim.currentQuarter}. Reload the page to see the open quarter.`,
-      );
-    }
-    const pastDeadline =
-      sim.status === SimulationStatus.IN_PROGRESS &&
-      !!sim.quarterEndsAt &&
-      Date.now() >= new Date(sim.quarterEndsAt).getTime();
-    if (sim.closingQuarter === quarter || pastDeadline) {
-      throw new ConflictException(QUARTER_CLOSED_MESSAGE(quarter));
-    }
-  }
-
-  // ============================================================================
   // CREATE DECISION (Draft)
   // ============================================================================
 
@@ -145,8 +104,6 @@ export class DecisionService {
         `Decision already exists for firm ${dto.firm} quarter ${dto.quarter}`,
       );
     }
-
-    await this.assertQuarterOpen(dto.simulation, dto.quarter);
 
     const sanitizedDto = await this.sanitizeLockedModuleFieldsForSave(dto, {
       simulationId: dto.simulation,
@@ -201,21 +158,6 @@ export class DecisionService {
     }
     // DRAFT and SUBMITTED: Allow all changes (data and status)
 
-    const changesData = Object.entries(dto).some(
-      ([key, value]) => key !== 'status' && value !== undefined,
-    );
-    // Any status change on a draft or submitted decision (submit, or
-    // withdraw back to draft) needs the quarter open. Reopening a PROCESSED
-    // or LOCKED decision is the existing faculty path and is left as is.
-    const resubmits =
-      dto.status !== undefined &&
-      (dto.status as DecisionStatus) !== decision.status &&
-      decision.status !== DecisionStatus.PROCESSED &&
-      decision.status !== DecisionStatus.LOCKED;
-    if (changesData || resubmits) {
-      await this.assertQuarterOpen(decision.simulation, decision.quarter);
-    }
-
     const sanitizedDto = await this.sanitizeLockedModuleFieldsForSave(dto, {
       simulationId: decision.simulation.toString(),
       firmId: decision.firm.toString(),
@@ -223,18 +165,14 @@ export class DecisionService {
       context: 'update',
     });
 
-    const updated = await this.decisionModel.findOneAndUpdate(
-      changesData || resubmits
-        ? { _id: decisionId, quarterClosed: { $ne: true } }
-        : { _id: decisionId },
+    const updated = await this.decisionModel.findByIdAndUpdate(
+      decisionId,
       { $set: sanitizedDto },
       { new: true, runValidators: false },
     );
 
     if (!updated) {
-      // The decision exists (we read it above), so the filter failed on
-      // quarterClosed: the close started between our check and this write.
-      throw new ConflictException(QUARTER_CLOSED_MESSAGE(decision.quarter));
+      throw new NotFoundException(`Decision ${id} not found`);
     }
 
     return this.toResponseDto(updated);
@@ -256,8 +194,6 @@ export class DecisionService {
         `Decision already submitted with status ${decision.status}`,
       );
     }
-
-    await this.assertQuarterOpen(decision.simulation, decision.quarter);
 
     await this.sanitizeLockedModuleFieldsOnDocument(decision, 'submit');
     await decision.save();
@@ -322,32 +258,13 @@ export class DecisionService {
       )
       .map((m: any) => m.moduleId);
 
-    // Save the checked decision while it is still a draft, then flip it to
-    // SUBMITTED in one conditional write. The filter is the quarter check
-    // inside the write: if the close has started, quarterClosed is true and
-    // the flip finds nothing.
-    await decision.save();
-
-    const submittedFields: Record<string, unknown> = {
-      status: DecisionStatus.SUBMITTED,
-      submittedAt: new Date(),
-    };
+    decision.status = DecisionStatus.SUBMITTED;
+    decision.submittedAt = new Date();
     if (userId) {
-      submittedFields.submittedBy = new Types.ObjectId(userId);
+      decision.submittedBy = new Types.ObjectId(userId);
     }
 
-    const saved = await this.decisionModel.findOneAndUpdate(
-      {
-        _id: decision._id,
-        status: DecisionStatus.DRAFT,
-        quarterClosed: { $ne: true },
-      },
-      { $set: submittedFields },
-      { new: true },
-    );
-    if (!saved) {
-      throw new ConflictException(QUARTER_CLOSED_MESSAGE(decision.quarter));
-    }
+    const saved = await decision.save();
 
     if (userId) {
       await this.enrollmentModel.updateOne(
