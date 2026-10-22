@@ -10,6 +10,7 @@ import { SimulationModule } from './modules/simulation/simulation.module';
 import { DecisionModule } from './modules/decision/decision.module';
 import { ReportsModule } from './modules/reports/reports.module';
 import { OnboardingModule } from './modules/onboarding/onboarding.module';
+import { ReportingModule } from './modules/reporting/reporting.module';
 
 @Module({
   imports: [
@@ -33,6 +34,7 @@ import { OnboardingModule } from './modules/onboarding/onboarding.module';
     DecisionModule,
     ReportsModule,
     OnboardingModule,
+    ReportingModule,
   ],
   controllers: [AppController],
   providers: [AppService],

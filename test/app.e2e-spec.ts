@@ -6,6 +6,7 @@ import { INestApplication } from '@nestjs/common';
 import request from 'supertest';
 import { App } from 'supertest/types';
 import { AppModule } from './../src/app.module';
+import { configureApp } from './../src/app.setup';
 
 describe('App (e2e)', () => {
   let app: INestApplication<App>;
@@ -16,6 +17,7 @@ describe('App (e2e)', () => {
     }).compile();
 
     app = moduleFixture.createNestApplication();
+    configureApp(app);
     await app.init();
   });
 
@@ -23,26 +25,30 @@ describe('App (e2e)', () => {
     await app.close();
   });
 
-  it('GET / answers', () => {
+  it('GET /api answers', () => {
     return request(app.getHttpServer())
-      .get('/')
+      .get('/api')
       .expect(200)
       .expect('Hello World!');
   });
 
-  it('GET /health reports the sim and a commit', async () => {
-    const res = await request(app.getHttpServer()).get('/health').expect(200);
+  it('GET /api/health reports the sim and a commit', async () => {
+    const res = await request(app.getHttpServer())
+      .get('/api/health')
+      .expect(200);
     expect(res.body).toMatchObject({ status: 'ok', sim: 'data_analytics' });
     expect(typeof res.body.commit).toBe('string');
   });
 
-  it('GET /cron/quarter-tick is public but refuses calls without the secret', async () => {
+  it('GET /api/cron/quarter-tick is public but refuses calls without the secret', async () => {
     const saved = process.env.CRON_SECRET;
     process.env.CRON_SECRET = 'e2e-secret';
     try {
-      await request(app.getHttpServer()).get('/cron/quarter-tick').expect(403);
+      await request(app.getHttpServer())
+        .get('/api/cron/quarter-tick')
+        .expect(403);
       const res = await request(app.getHttpServer())
-        .get('/cron/quarter-tick')
+        .get('/api/cron/quarter-tick')
         .set('Authorization', 'Bearer e2e-secret')
         .expect(200);
       expect(res.body).toMatchObject({ advanced: 0, remindersSent: 0 });
