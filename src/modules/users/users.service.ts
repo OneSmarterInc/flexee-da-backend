@@ -161,9 +161,33 @@ export class UsersService {
   /**
    * Deactivate user (soft delete)
    */
-  async deactivateUser(userId: string): Promise<User> {
+  async deactivateUser(userId: string, actingUserId?: string): Promise<User> {
     if (!Types.ObjectId.isValid(userId)) {
       throw new BadRequestException('Invalid user ID');
+    }
+
+    if (actingUserId && actingUserId === userId) {
+      throw new BadRequestException('You can’t deactivate your own account.');
+    }
+
+    const target = await this.userModel
+      .findById(userId)
+      .select('role isActive');
+    if (!target) {
+      throw new NotFoundException('User not found');
+    }
+
+    if (target.role === UserRole.ADMIN && target.isActive) {
+      const otherActiveAdmins = await this.userModel.countDocuments({
+        _id: { $ne: target._id },
+        role: UserRole.ADMIN,
+        isActive: true,
+      });
+      if (otherActiveAdmins === 0) {
+        throw new BadRequestException(
+          'This is the last active admin, so it can’t be deactivated. Make another admin first.',
+        );
+      }
     }
 
     const updatedUser = await this.userModel.findByIdAndUpdate(
