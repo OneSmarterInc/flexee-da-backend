@@ -11,6 +11,7 @@ import { DecisionModule } from './modules/decision/decision.module';
 import { ReportsModule } from './modules/reports/reports.module';
 import { OnboardingModule } from './modules/onboarding/onboarding.module';
 import { ReportingModule } from './modules/reporting/reporting.module';
+import { AiModule } from './modules/ai/ai.module';
 
 @Module({
   imports: [
@@ -35,6 +36,7 @@ import { ReportingModule } from './modules/reporting/reporting.module';
     ReportsModule,
     OnboardingModule,
     ReportingModule,
+    AiModule,
   ],
   controllers: [AppController],
   providers: [AppService],

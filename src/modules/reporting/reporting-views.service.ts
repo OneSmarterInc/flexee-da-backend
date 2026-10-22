@@ -8,8 +8,9 @@
 // - report_closes has one row per quarter close (DA closes every firm in one
 //   step), so firm_id is null, as in BPM. Closes are recorded from V3 layer 3
 //   on; earlier ones have no record.
-// - report_requests and report_ai_use have no rows: DA has no
-//   accounting-method requests and no AI features yet.
+// - report_requests has no rows: DA has no accounting-method requests.
+// - report_ai_use comes from ai_calls (V3 layer 4); it has rows once an AI
+//   feature runs.
 // - report_health: DA runs on Node with no queue, so the job columns and
 //   php_version are null; the scheduler columns come from scheduler_state.
 //
@@ -34,6 +35,8 @@ import {
 } from '../../entities/index.entity';
 import { QuarterCloseLog, SchedulerState } from './reporting.schemas';
 import { ReportingOAuthService } from './reporting-oauth.service';
+import { AiCall } from '../ai/ai-use.schema';
+import { AiUseService, monthStart } from '../ai/ai-use.service';
 
 export const SIM = 'data_analytics';
 export const CONTRACT = 'v1';
@@ -150,12 +153,16 @@ export const TOOLS: Record<string, Tool> = {
   },
   report_ai_use: {
     title: 'AI use',
-    description: 'DA has no AI features yet, so this returns no rows.',
+    description:
+      'One row per course, month and AI feature in the last 12 months: calls, failures, sentences the checks dropped, tokens and cost.',
     columns: col([
       ['course_id', "The course's id."],
       ['course', "The course's name."],
       ['month', 'The month, as YYYY-MM.'],
-      ['feature', 'The AI feature.'],
+      [
+        'feature',
+        'ask_claude, readings, team_explanations or debrief_captions.',
+      ],
       ['calls', 'Calls to Claude, each retry counted.'],
       ['failures', 'Calls that failed or came back unusable.'],
       ['sentences_dropped', 'Sentences the checks removed.'],
@@ -194,9 +201,9 @@ export const TOOLS: Record<string, Tool> = {
       ],
       ['closes_failed', 'Failed closes in the last 7 days.'],
       ['requests_waiting', 'Always 0.'],
-      ['ai_enabled', 'Always false: DA has no AI features yet.'],
-      ['ai_spent_this_month_usd', 'Always 0.'],
-      ['ai_ceiling_usd', 'Always null.'],
+      ['ai_enabled', 'True when AI features can run on this site.'],
+      ['ai_spent_this_month_usd', 'AI spend this month, in US dollars.'],
+      ['ai_ceiling_usd', "The site's monthly AI ceiling, in US dollars."],
       [
         'certificate_expires_at',
         'Always null: the host renews the certificate.',
@@ -234,6 +241,8 @@ export class ReportingViewsService {
     private readonly scheduler: Model<SchedulerState>,
     @InjectConnection() private readonly db: MongoConnection,
     private readonly oauth: ReportingOAuthService,
+    @InjectModel(AiCall.name) private readonly aiCalls: Model<AiCall>,
+    private readonly ai: AiUseService,
   ) {}
 
   async run(name: string): Promise<Array<Record<string, unknown>>> {
@@ -247,7 +256,7 @@ export class ReportingViewsService {
       case 'report_requests':
         return [];
       case 'report_ai_use':
-        return [];
+        return this.aiUse();
       case 'report_health':
         return [await this.health()];
       default:
@@ -430,6 +439,62 @@ export class ReportingViewsService {
     }));
   }
 
+  private async aiUse() {
+    const start = monthStart(new Date());
+    const since = new Date(
+      Date.UTC(start.getUTCFullYear(), start.getUTCMonth() - 11, 1),
+    );
+    const calls = await this.aiCalls
+      .find({ createdAt: { $gte: since } })
+      .select(
+        'simulationId course feature outcome sentencesDropped inputTokens outputTokens costUsd createdAt',
+      )
+      .lean();
+    type Row = {
+      sim: string;
+      course_id: string | null;
+      course: string | null;
+      month: string;
+      feature: string;
+      calls: number;
+      failures: number;
+      sentences_dropped: number;
+      input_tokens: number;
+      output_tokens: number;
+      cost_usd: number;
+    };
+    const rows = new Map<string, Row>();
+    for (const c of calls) {
+      const month = new Date(c.createdAt).toISOString().slice(0, 7);
+      const courseId = c.simulationId ? String(c.simulationId) : null;
+      const key = `${courseId}#${month}#${c.feature}`;
+      const row: Row = rows.get(key) ?? {
+        sim: SIM,
+        course_id: courseId,
+        course: c.course,
+        month,
+        feature: c.feature,
+        calls: 0,
+        failures: 0,
+        sentences_dropped: 0,
+        input_tokens: 0,
+        output_tokens: 0,
+        cost_usd: 0,
+      };
+      row.calls += 1;
+      if (c.outcome === 'error') row.failures += 1;
+      row.sentences_dropped += c.sentencesDropped ?? 0;
+      row.input_tokens += c.inputTokens ?? 0;
+      row.output_tokens += c.outputTokens ?? 0;
+      row.cost_usd += c.costUsd ?? 0;
+      rows.set(key, row);
+    }
+    const sortKey = (r: Row) => `${r.month}#${r.course ?? ''}#${r.feature}`;
+    return [...rows.values()]
+      .map((r) => ({ ...r, cost_usd: Math.round(r.cost_usd * 100) / 100 }))
+      .sort((a, b) => sortKey(a).localeCompare(sortKey(b)));
+  }
+
   private async databaseVersion(): Promise<string | null> {
     try {
       const info = await this.db.db!.admin().command({ buildInfo: 1 });
@@ -441,7 +506,7 @@ export class ReportingViewsService {
 
   async health() {
     const sims = await this.allSims();
-    const [version, state, failed, connections] = await Promise.all([
+    const [version, state, failed, connections, spent] = await Promise.all([
       this.databaseVersion(),
       this.scheduler.findOne({ key: SWEEP_KEY }).lean(),
       this.closeLogs.countDocuments({
@@ -449,6 +514,7 @@ export class ReportingViewsService {
         completedAt: { $gt: new Date(Date.now() - 7 * 86_400_000) },
       }),
       this.oauth.activeConnections(),
+      this.ai.siteSpend(),
     ]);
     const overdue = sims.filter(
       (s) =>
@@ -482,9 +548,9 @@ export class ReportingViewsService {
       quarters_overdue: overdue,
       closes_failed: failed,
       requests_waiting: 0,
-      ai_enabled: false,
-      ai_spent_this_month_usd: 0,
-      ai_ceiling_usd: null,
+      ai_enabled: this.ai.settings.available,
+      ai_spent_this_month_usd: spent,
+      ai_ceiling_usd: this.ai.settings.ceilingUsd,
       certificate_expires_at: null,
       certificate_days_left: null,
       connections_active: connections,
