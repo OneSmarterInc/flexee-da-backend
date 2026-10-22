@@ -7,6 +7,7 @@ import {
   NotFoundException,
   BadRequestException,
   ForbiddenException,
+  ConflictException,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
@@ -5435,9 +5436,115 @@ export class SimulationService {
     return firm;
   }
 
-  // Add this to simulation.service.ts
+  // ============================================================================
+  // QUARTER CLOSE — one claim for every close path
+  // ============================================================================
+  //
+  // Three paths close a quarter: the faculty button (advanceQuarter), the
+  // lazy close on page load (checkQuarterExpiry) and the background sweep
+  // (QuarterTickService → autoAdvanceExpiredQuarter → checkQuarterExpiry).
+  // Each must win this claim first. The claim is one atomic update on the
+  // simulation, keyed on the quarter being closed, so two paths that race
+  // at the deadline can't both process the same quarter.
 
+  static readonly QUARTER_CLOSE_STALE_MINUTES = 15;
+
+  /**
+   * Try to claim the close of `quarter`. Returns true if this caller won.
+   * Fails if the sim has already moved past `quarter`, or another caller
+   * holds a live claim on it.
+   */
+  async claimQuarterClose(
+    simObjectId: Types.ObjectId,
+    quarter: number,
+  ): Promise<boolean> {
+    const now = new Date();
+    const staleCutoff = new Date(
+      now.getTime() - SimulationService.QUARTER_CLOSE_STALE_MINUTES * 60_000,
+    );
+    const claimed = await this.simulationModel.findOneAndUpdate(
+      {
+        _id: simObjectId,
+        currentQuarter: quarter,
+        $or: [
+          { closingQuarter: { $exists: false } },
+          { closingQuarter: { $ne: quarter } },
+          { closingStartedAt: { $lte: staleCutoff } },
+        ],
+      },
+      { $set: { closingQuarter: quarter, closingStartedAt: now } },
+      { new: true },
+    );
+    if (!claimed) return false;
+
+    // Mark every decision of the quarter as closed. Submit and update check
+    // this flag inside their own write, so a save that arrives after this
+    // point is refused instead of landing mid-close.
+    await this.decisionModel.updateMany(
+      { simulation: simObjectId, quarter },
+      { $set: { quarterClosed: true } },
+    );
+    return true;
+  }
+
+  /** Release the claim on `quarter`, whether the close worked or not. */
+  async releaseQuarterClose(
+    simObjectId: Types.ObjectId,
+    quarter: number,
+  ): Promise<void> {
+    await this.simulationModel.updateOne(
+      { _id: simObjectId, closingQuarter: quarter },
+      { $set: { closingQuarter: null, closingStartedAt: null } },
+    );
+  }
+
+  /**
+   * Faculty and admin close. Claims the current quarter, processes it and
+   * releases the claim. Throws 409 if another close is already running.
+   */
   async advanceQuarter(simulationId: string): Promise<any> {
+    const simObjectId = this.toObjectId(simulationId);
+    const sim = await this.simulationModel
+      .findById(simObjectId)
+      .select('currentQuarter')
+      .lean();
+    if (!sim) {
+      throw new NotFoundException(`Simulation ${simulationId} not found`);
+    }
+    const quarter = sim.currentQuarter;
+
+    const won = await this.claimQuarterClose(simObjectId, quarter);
+    if (!won) {
+      throw new ConflictException(
+        `Quarter ${quarter} is already being closed. Reload the page in a minute to see the results.`,
+      );
+    }
+    try {
+      return await this.processQuarterClose(simulationId);
+    } catch (err) {
+      // The quarter did not move on. If its deadline hasn't passed, students
+      // must be able to keep saving, so lift the close mark again.
+      const still = await this.simulationModel
+        .findById(simObjectId)
+        .select('currentQuarter')
+        .lean();
+      if (still?.currentQuarter === quarter) {
+        await this.decisionModel.updateMany(
+          { simulation: simObjectId, quarter },
+          { $set: { quarterClosed: false } },
+        );
+      }
+      throw err;
+    } finally {
+      await this.releaseQuarterClose(simObjectId, quarter);
+    }
+  }
+
+  /**
+   * Process the current quarter and move to the next one. The caller must
+   * hold the close claim (see claimQuarterClose); never call this directly.
+   */
+  private async processQuarterClose(simulationId: string): Promise<any> {
     const simObjectId = this.toObjectId(simulationId);
     const simulation = await this.simulationModel.findById(simObjectId);
 
@@ -8889,44 +8996,53 @@ export class SimulationService {
     const simObjectId = simulation._id as Types.ObjectId;
     const currentQuarter = simulation.currentQuarter;
 
-    // Who's missing?
-    const firms = await this.firmModel.find({ simulation: simObjectId });
-    const submittedFirmIds = await this.decisionModel.distinct('firm', {
-      simulation: simObjectId,
-      quarter: currentQuarter,
-      status: { $in: [DecisionStatus.SUBMITTED, DecisionStatus.PROCESSED] },
-    });
-    const submittedSet = new Set(submittedFirmIds.map((id) => String(id)));
-    const missingFirms = firms.filter(
-      (f) => !submittedSet.has(String(f._id)),
-    );
+    // Claim the close before touching anything. If another path already
+    // holds it (or the quarter has moved on), this call is a no-op.
+    const won = await this.claimQuarterClose(simObjectId, currentQuarter);
+    if (!won) return false;
 
-    if (missingFirms.length > 0) {
-      console.log(
-        `[QuarterExpiry] sim=${simObjectId} Q${currentQuarter} expired with ` +
-          `${missingFirms.length}/${firms.length} firms unsubmitted. ` +
-          `Carrying forward prior-quarter decisions.`,
-      );
-
-      for (const firm of missingFirms) {
-        await this.carryForwardDecision(
-          simObjectId,
-          firm._id as Types.ObjectId,
-          currentQuarter,
-        );
-      }
-    }
-
-    // Now everyone is submitted — advance.
     try {
-      await this.advanceQuarter(String(simObjectId));
-      return true;
-    } catch (err) {
-      console.error(
-        `[QuarterExpiry] auto-advance failed for sim ${simObjectId}:`,
-        err,
+      // Who's missing?
+      const firms = await this.firmModel.find({ simulation: simObjectId });
+      const submittedFirmIds = await this.decisionModel.distinct('firm', {
+        simulation: simObjectId,
+        quarter: currentQuarter,
+        status: { $in: [DecisionStatus.SUBMITTED, DecisionStatus.PROCESSED] },
+      });
+      const submittedSet = new Set(submittedFirmIds.map((id) => String(id)));
+      const missingFirms = firms.filter(
+        (f) => !submittedSet.has(String(f._id)),
       );
-      return false;
+
+      if (missingFirms.length > 0) {
+        console.log(
+          `[QuarterExpiry] sim=${simObjectId} Q${currentQuarter} expired with ` +
+            `${missingFirms.length}/${firms.length} firms unsubmitted. ` +
+            `Carrying forward prior-quarter decisions.`,
+        );
+
+        for (const firm of missingFirms) {
+          await this.carryForwardDecision(
+            simObjectId,
+            firm._id as Types.ObjectId,
+            currentQuarter,
+          );
+        }
+      }
+
+      // Now everyone is submitted — advance.
+      try {
+        await this.processQuarterClose(String(simObjectId));
+        return true;
+      } catch (err) {
+        console.error(
+          `[QuarterExpiry] auto-advance failed for sim ${simObjectId}:`,
+          err,
+        );
+        return false;
+      }
+    } finally {
+      await this.releaseQuarterClose(simObjectId, currentQuarter);
     }
   }
 

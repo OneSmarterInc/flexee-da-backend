@@ -1,0 +1,56 @@
+# Runs the backend tests against a real MongoDB on every pull request and
+# every push to v3-dev. It runs on GitHub's own machines, never on the
+# self-hosted production server, and it deploys nothing.
+name: Tests (MongoDB)
+
+on:
+  pull_request:
+  push:
+    branches:
+      - v3-dev
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      mongo:
+        image: mongo:7
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.runCommand({ ping: 1 })'"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      # Throwaway databases inside the job's own MongoDB.
+      MONGO_TEST_URI: mongodb://127.0.0.1:27017/flexee_da_test
+      MONGODB_URI: mongodb://127.0.0.1:27017/flexee_da_e2e
+      # Fail, don't skip, if the database suites can't reach MongoDB.
+      REQUIRE_TEST_DB: '1'
+      # Test-only value so the app can boot; not a real secret.
+      JWT_SECRET: ci-test-only
+      CRON_QUARTER_TICK_ENABLED: 'false'
+      # Don't download a MongoDB binary during npm ci; the service above is used.
+      MONGOMS_DISABLE_POSTINSTALL: '1'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Same Node major version as the production deploy workflow.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+      - run: npm run build
+      # The github-actions reporter turns each failed test into an error
+      # note on the run, readable through the GitHub API without the log.
+      - name: Unit and database tests
+        run: npm test -- --ci --reporters=default --reporters=github-actions
+      - name: End-to-end tests
+        run: npm run test:e2e -- --ci --reporters=default --reporters=github-actions
