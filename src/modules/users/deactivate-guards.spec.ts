@@ -5,6 +5,7 @@ import { BadRequestException } from '@nestjs/common';
 import { Connection, Model, Types } from 'mongoose';
 import {
   clearTestDb,
+  closeTestDb,
   connectTestDb,
   describeDb,
 } from '../../../test/mongo-test-db';
@@ -33,7 +34,7 @@ describeDb('deactivate guards', () => {
   });
 
   afterAll(async () => {
-    await conn.close();
+    await closeTestDb(conn);
   });
 
   beforeEach(async () => {

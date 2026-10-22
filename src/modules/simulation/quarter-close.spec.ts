@@ -9,6 +9,7 @@ import { ConflictException } from '@nestjs/common';
 import { Connection, Model, Types } from 'mongoose';
 import {
   clearTestDb,
+  closeTestDb,
   connectTestDb,
   describeDb,
 } from '../../../test/mongo-test-db';
@@ -57,7 +58,7 @@ describeDb('quarter close claim', () => {
   });
 
   afterAll(async () => {
-    await conn.close();
+    await closeTestDb(conn);
   });
 
   beforeEach(async () => {
@@ -71,9 +72,14 @@ describeDb('quarter close claim', () => {
     svc.processQuarterClose = jest.fn(async (simId: string) => {
       processed += 1;
       await new Promise((r) => setTimeout(r, 50));
+      // Like the real close: move to the next quarter and open a new
+      // window, so a late caller sees a quarter that isn't due yet.
       await Sim.updateOne(
         { _id: new Types.ObjectId(simId) },
-        { $inc: { currentQuarter: 1 } },
+        {
+          $inc: { currentQuarter: 1 },
+          $set: { quarterEndsAt: new Date(Date.now() + 86_400_000) },
+        },
       );
       return { ok: true };
     });
