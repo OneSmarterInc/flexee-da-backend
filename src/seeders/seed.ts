@@ -178,6 +178,8 @@ async function runSeeder() {
       totalMarketSize: 600_000,
       courseCode: DEMO_COURSE_CODE,
       institutionName: 'FLEXEE DA Demo',
+      // The demo course runs on Dayton time; every course needs a zone.
+      timezone: 'America/New_York',
       quarterDurationDays: 14,
       firmConfigs: [
         { firmNumber: 1, name: 'Firm 1', color: '#3B82F6' },

@@ -357,3 +357,59 @@ export async function sendStudentInviteEmail(
     emailWrapper(content)
   );
 }
+
+/* -------------------------------------------
+   QUARTER REMINDER (the day before it closes)
+-------------------------------------------- */
+
+/**
+ * Tell a student that their team hasn't submitted and the quarter closes
+ * soon. `closesAt` is already formatted in the course time zone, e.g.
+ * "23 Oct 2026, 11:59 PM EDT".
+ */
+export async function sendQuarterReminderEmail(
+  email: string,
+  name: string,
+  simulationName: string,
+  quarter: number,
+  closesAt: string,
+  link: string,
+): Promise<boolean> {
+  const content = `
+    <h1 style="font-size:22px;font-weight:800;line-height:1.3;margin:0 0 14px;
+               color:${BRAND.textPrimary};font-family:'Inter',Arial,sans-serif;">
+      Quarter ${quarter} closes ${escapeHtml(closesAt)}
+    </h1>
+    <p style="font-size:15px;line-height:1.65;color:${BRAND.textPrimary};margin:0 0 14px;
+              font-family:'Inter',Arial,sans-serif;">
+      Hi ${escapeHtml(name || 'there')}, your team has not submitted its decisions for
+      Quarter ${quarter} in ${escapeHtml(simulationName)}.
+    </p>
+    <p style="font-size:15px;line-height:1.65;color:${BRAND.textMuted};margin:0 0 24px;
+              font-family:'Inter',Arial,sans-serif;">
+      If nobody on your team submits by then, your team's decisions from the
+      last quarter are used again.
+    </p>
+    <div style="text-align:center;margin:0 0 8px;">
+      <a href="${link}" style="display:inline-block;padding:12px 22px;border-radius:8px;
+                background:${BRAND.accent};color:#ffffff;text-decoration:none;
+                font-weight:700;font-family:'Inter',Arial,sans-serif;">
+        Open my decisions
+      </a>
+    </div>
+  `;
+  return sendEmailViaMailjet(
+    email,
+    name,
+    `Quarter ${quarter} closes ${closesAt}`,
+    emailWrapper(content),
+  );
+}
+
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}

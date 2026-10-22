@@ -454,6 +454,11 @@ export class Simulation {
 
   @Prop({ type: Date, default: null })
   closingStartedAt!: Date | null;
+
+  // The quarter whose day-before reminder has been sent. The sweep claims
+  // it atomically, so each quarter's reminder goes out once.
+  @Prop({ type: Number, default: null })
+  reminderSentForQuarter!: number | null;
 }
 
 export const SimulationSchema = SchemaFactory.createForClass(Simulation);
