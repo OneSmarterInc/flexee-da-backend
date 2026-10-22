@@ -48,7 +48,9 @@ jobs:
 
       - run: npm ci
       - run: npm run build
+      # The github-actions reporter turns each failed test into an error
+      # note on the run, readable through the GitHub API without the log.
       - name: Unit and database tests
-        run: npm test -- --ci
+        run: npm test -- --ci --reporters=default --reporters=github-actions
       - name: End-to-end tests
-        run: npm run test:e2e -- --ci
+        run: npm run test:e2e -- --ci --reporters=default --reporters=github-actions
