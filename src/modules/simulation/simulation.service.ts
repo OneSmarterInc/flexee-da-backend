@@ -9438,6 +9438,22 @@ export class SimulationService {
       
       simulation.deploymentStatus = 'STUDENT_DEPLOYED';
       simulation.deployedForStudentAt = new Date();
+
+      // Deploying to students starts play: the first student quarter opens
+      // now, closes on the course calendar, and the course is IN_PROGRESS.
+      // Before this, the course stayed INITIALIZED until a manual advance,
+      // so its first quarter never closed on its own, and its deadline
+      // counted from when the course was created.
+      if (simulation.status === SimulationStatus.INITIALIZED) {
+        const now = new Date();
+        simulation.status = SimulationStatus.IN_PROGRESS;
+        simulation.quarterStartedAt = now;
+        simulation.quarterEndsAt = quarterDeadline(
+          now,
+          simulation.quarterDurationDays,
+          simulation.timezone || 'UTC',
+        );
+      }
     }
 
     await simulation.save();
