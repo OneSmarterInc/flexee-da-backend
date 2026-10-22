@@ -459,6 +459,11 @@ export class Simulation {
   // it atomically, so each quarter's reminder goes out once.
   @Prop({ type: Number, default: null })
   reminderSentForQuarter!: number | null;
+
+  // The course's AI switch (V3 layer 4). Off means no AI features run for
+  // this course, whatever the site's ceiling.
+  @Prop({ default: true })
+  aiEnabled!: boolean;
 }
 
 export const SimulationSchema = SchemaFactory.createForClass(Simulation);

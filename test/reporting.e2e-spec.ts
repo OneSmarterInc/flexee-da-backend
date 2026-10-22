@@ -241,6 +241,9 @@ describe('Reporting connector (e2e)', () => {
       contract: 'v1',
       courses_running: 1,
       connections_active: 1,
+      ai_enabled: false,
+      ai_spent_this_month_usd: 0,
+      ai_ceiling_usd: 50,
     });
   });
 
