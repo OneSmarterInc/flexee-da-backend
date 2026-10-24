@@ -2,18 +2,31 @@
 // FLEXEE 2.0 Supply Chain Simulation - FIXED VERSION
 // Key Fix: Consistent ObjectId usage in all queries
 
+import { assertCourseAccess } from './course-access';
+import { assertCanEnrol } from './enroll-rules';
+import { draw, newSeed, withSeed } from '../../lib/random';
+import {
+  REFERENCE_PATHS,
+  REFERENCE_PATH_IDS,
+  isReferencePath,
+  type PathContext,
+} from './reference-paths';
+import { NarrativesService } from '../narratives/narratives.service';
+import { loadOutcomes } from '../reports/outcome.loader';
 import {
   Injectable,
   NotFoundException,
   BadRequestException,
   ForbiddenException,
   ConflictException,
+  Optional,
 } from '@nestjs/common';
 import { QuarterCloseLog } from '../reporting/reporting.schemas';
 import {
   addLocalDays,
   isValidTimeZone,
   quarterDeadline,
+  formatCourseDateTime,
 } from '../../lib/courseTime';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
@@ -293,6 +306,8 @@ export class SimulationService {
     private studentOnboardingModel: Model<StudentOnboardingDocument>,
     @InjectModel(QuarterCloseLog.name)
     private quarterCloseLogModel: Model<QuarterCloseLog>,
+    // The quarter texts (Design D). Optional: a close never depends on them.
+    @Optional() private narratives?: NarrativesService,
   ) {}
 
   // ============================================================================
@@ -665,6 +680,8 @@ export class SimulationService {
       status: SimulationStatus.CREATED,
       currentQuarter: 0,
       totalQuarters,
+      // Not in the DTO, so the API strips it; only tests pass a fixed seed.
+      randomSeed: (dto as { randomSeed?: number }).randomSeed ?? newSeed(),
       orientationQuarters: scheduleConfig.orientationQuarters,
       schedulePreset: scheduleConfig.schedulePreset,
       numFirms: dto.numFirms ?? 3,
@@ -788,6 +805,253 @@ export class SimulationService {
     }
 
     return this.findOne(simulationId.toString());
+  }
+
+  // ============================================================================
+  // THIS WEEK (V3 Design G)
+  // ============================================================================
+
+  /**
+   * The weekly work in one call: the open quarter and when it closes (course
+   * time), how long is left, each firm's status with its submit time and the
+   * submitter's name, and the reminder. Faculty-only: it names students.
+   */
+  async getThisWeek(user: { _id: unknown; role?: string }, simulationId: string, now = new Date()): Promise<any> {
+    const simObjectId = this.toObjectId(simulationId);
+    const sim: any = await this.simulationModel.findById(simObjectId).lean();
+    if (!sim) throw new NotFoundException(`Simulation ${simulationId} not found`);
+    assertCourseAccess(user as any, sim);
+
+    const tz = sim.timezone || 'UTC';
+    const quarter = sim.currentQuarter as number;
+    const open = sim.status === SimulationStatus.IN_PROGRESS;
+    const firms: any[] = await this.firmModel.find({ simulation: simObjectId }).sort({ firmNumber: 1 }).lean();
+    const decisions: any[] = await this.decisionModel
+      .find({ simulation: simObjectId, quarter: { $in: [quarter, quarter - 1] } })
+      .lean();
+    const submitterIds = decisions.map((d) => d.submittedBy).filter(Boolean);
+    const submitters: any[] = await this.userModel.find({ _id: { $in: submitterIds } }).select('firstName lastName').lean();
+    const nameOf = new Map(submitters.map((u) => [String(u._id), [u.firstName, u.lastName].filter(Boolean).join(' ')]));
+
+    const endsAt: Date | null = sim.quarterEndsAt ? new Date(sim.quarterEndsAt) : null;
+    const msLeft = endsAt ? endsAt.getTime() - now.getTime() : null;
+    const left = (ms: number) => {
+      const mins = Math.max(0, Math.round(ms / 60000));
+      const d = Math.floor(mins / 1440);
+      const h = Math.floor((mins % 1440) / 60);
+      const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? '' : 's'}`;
+      return d > 0 ? `${plural(d, 'day')} ${plural(h, 'hour')}` : `${plural(h, 'hour')} ${mins % 60} minutes`;
+    };
+
+    const firmRows = firms.map((f) => {
+      const id = String(f._id);
+      const cur = decisions.find((d) => String(d.firm) === id && d.quarter === quarter);
+      const prev = decisions.find((d) => String(d.firm) === id && d.quarter === quarter - 1);
+      let status: 'submitted' | 'draft' | 'nothing' | 'reference';
+      if (f.referencePath) status = 'reference';
+      else if (cur && cur.status !== 'DRAFT') status = 'submitted';
+      else if (cur) status = 'draft';
+      else status = 'nothing';
+      const missedLast = prev?.submittedHow === 'carried_forward' || prev?.submittedHow === 'baseline';
+      return {
+        firmId: id,
+        firm: f.name,
+        status,
+        submittedAt: status === 'submitted' && cur?.submittedAt ? formatCourseDateTime(new Date(cur.submittedAt), tz) : null,
+        submittedBy: status === 'submitted' && cur?.submittedBy ? nameOf.get(String(cur.submittedBy)) ?? null : null,
+        // After a close: a firm whose last quarter was played on last quarter's decisions.
+        lastQuarterNotSubmitted: missedLast ? quarter - 1 : null,
+      };
+    });
+
+    const reminded = sim.reminderSentForQuarter === quarter && sim.reminderSentAt;
+    return {
+      course: sim.name,
+      status: sim.status,
+      isPractice: sim.isPractice === true,
+      quarter,
+      totalQuarters: sim.totalQuarters,
+      timeZone: tz,
+      open,
+      closesAt: open && endsAt ? formatCourseDateTime(endsAt, tz) : null,
+      timeLeft: open && msLeft !== null ? (msLeft > 0 ? left(msLeft) : 'past its deadline; it closes within a few minutes') : null,
+      firms: firmRows,
+      reminder: reminded
+        ? { sentAt: formatCourseDateTime(new Date(sim.reminderSentAt), tz), firms: sim.reminderFirmCount ?? 0 }
+        : null,
+    };
+  }
+
+  // ============================================================================
+  // PRACTICE COURSES (V3 Design E)
+  // ============================================================================
+
+  /**
+   * "Practise this course": a practice copy of a live course with the same
+   * schedule, quarters and time zone, no students, one firm for the faculty
+   * member and the three reference firms as its competitors. Quarters close
+   * only when the faculty member advances them.
+   */
+  async createPractice(user: { _id: unknown }, sourceId: string): Promise<any> {
+    const src = await this.simulationModel.findById(this.toObjectId(sourceId));
+    if (!src) throw new NotFoundException(`Simulation ${sourceId} not found`);
+    assertCourseAccess(user as any, src);
+    if (src.isPractice)
+      throw new BadRequestException('This is already a practice course.');
+    const userId = String(user._id);
+
+    const dto: any = {
+      name: `${src.name} (practice)`,
+      timezone: src.timezone,
+      totalQuarters: src.totalQuarters,
+      schedulePreset: src.schedulePreset,
+      quarterDurationDays: src.quarterDurationDays,
+      startingCash: src.startingCash,
+      numFirms: 1 + REFERENCE_PATH_IDS.length,
+      facultyIds: (src.facultyIds ?? []).map(String),
+    };
+    if (src.schedulePreset === SchedulePreset.CUSTOM) {
+      dto.orientationQuarters = src.orientationQuarters;
+      dto.moduleSchedule = {
+        mode: src.moduleSchedule?.mode,
+        modules: (src.moduleSchedule?.modules ?? []).map((m: any) => ({
+          moduleId: m.moduleId,
+          order: m.order,
+          unlocksAtQuarter: m.unlocksAtQuarter,
+          enabled: m.enabled,
+        })),
+      };
+    }
+    const created: any = await this.create(userId, dto);
+    const id = this.toObjectId(String(created._id ?? created.id));
+
+    await this.simulationModel.updateOne(
+      { _id: id },
+      {
+        $set: {
+          isPractice: true,
+          practiceOf: src._id,
+          owner: this.toObjectId(userId),
+        },
+      },
+    );
+    const firms = await this.firmModel
+      .find({ simulation: id })
+      .sort({ firmNumber: 1 });
+    const mine = firms[0];
+    await this.firmModel.updateOne(
+      { _id: mine._id },
+      {
+        $set: {
+          name: 'Your practice firm',
+          members: [this.toObjectId(userId)],
+        },
+      },
+    );
+    for (const [i, pathId] of REFERENCE_PATH_IDS.entries()) {
+      await this.firmModel.updateOne(
+        { _id: firms[i + 1]._id },
+        { $set: { referencePath: pathId, name: REFERENCE_PATHS[pathId].name } },
+      );
+    }
+    await this.enrollmentModel.create({
+      simulation: id,
+      firm: mine._id,
+      user: this.toObjectId(userId),
+      firmNumber: mine.firmNumber,
+      status: EnrollmentStatus.ACTIVE,
+      role: EnrollmentRole.TEAM_MEMBER,
+      canSubmitDecisions: true,
+      canViewReports: true,
+      canViewCompetitorData: true,
+    });
+    await this.startPractice(id);
+    return {
+      ...(await this.findOne(String(id))),
+      practiceFirmId: String(mine._id),
+    };
+  }
+
+  /** Opens Quarter 4 with no deadline. */
+  private async startPractice(id: Types.ObjectId): Promise<void> {
+    const deployed = (
+      await this.simulationModel.findById(id).select('deploymentStatus').lean()
+    )?.deploymentStatus;
+    if (deployed === 'NOT_DEPLOYED')
+      await this.deploySimulation(String(id), 'faculty');
+    if (deployed !== 'STUDENT_DEPLOYED')
+      await this.deploySimulation(String(id), 'student');
+    await this.simulationModel.updateOne(
+      { _id: id },
+      {
+        $set: {
+          status: SimulationStatus.IN_PROGRESS,
+          currentQuarter: CONFIG.simulation.PREHISTORY_QUARTERS + 1,
+          quarterStartedAt: new Date(),
+          quarterEndsAt: null,
+          closingQuarter: null,
+          closingStartedAt: null,
+          reminderSentForQuarter: null,
+        },
+      },
+    );
+  }
+
+  /** "Start over": deletes the practice course's quarters, decisions and histories and returns it to Quarter 4. */
+  async resetPractice(
+    user: { _id: unknown },
+    simulationId: string,
+  ): Promise<any> {
+    const id = this.toObjectId(simulationId);
+    const sim = await this.simulationModel.findById(id);
+    if (!sim)
+      throw new NotFoundException(`Simulation ${simulationId} not found`);
+    assertCourseAccess(user as any, sim);
+    if (!sim.isPractice)
+      throw new BadRequestException(
+        'Only a practice course can be started over.',
+      );
+
+    await Promise.all([
+      this.quarterStateModel.deleteMany({ simulation: id }),
+      this.demandHistoryModel.deleteMany({ simulation: id }),
+      this.kpiHistoryModel.deleteMany({ simulation: id }),
+      this.decisionModel.deleteMany({ simulation: id }),
+      this.creditHistoryModel.deleteMany({ simulation: id }),
+      this.eventModel.deleteMany({ simulation: id }),
+      this.eventImpactModel.deleteMany({ simulation: id }),
+      this.tenqReportModel.deleteMany({ simulation: id }),
+      this.supplierOrderModel.deleteMany({ simulation: id }),
+      this.forecastLogModel.deleteMany({ simulation: id }),
+      this.scrmHistoryModel.deleteMany({ simulation: id }),
+      this.quarterCloseLogModel.deleteMany({ simulationId: id }),
+      this.narratives?.clearFor(id),
+    ]);
+    const firms = await this.firmModel.find({ simulation: id });
+    for (const firm of firms) {
+      await this.firmModel.updateOne(
+        { _id: firm._id },
+        {
+          $set: {
+            currentCash: sim.startingCash,
+            currentCsi: 80,
+            currentMarketShare: 1 / firms.length,
+            cumulativeRevenue: 0,
+            cumulativeProfit: 0,
+          },
+        },
+      );
+      await this.createInitialQuarterState(
+        id,
+        firm._id as Types.ObjectId,
+        firms.length,
+        sim.startingCash,
+        sim.features as FeatureFlags,
+      );
+    }
+    await this.preSeedQuarters(sim, firms);
+    await this.startPractice(id);
+    return this.findOne(simulationId);
   }
 
   private buildFeatureToggles(dto?: Partial<FeatureFlags>): FeatureFlags {
@@ -1447,7 +1711,48 @@ export class SimulationService {
   // DEMAND GENERATION
   // ============================================================================
 
+  /** This course's random seed; a course made before seeds gets one now. */
+  private async seedFor(
+    simulationId: Types.ObjectId | string,
+  ): Promise<number> {
+    const id = this.toObjectId(simulationId);
+    const sim = await this.simulationModel
+      .findById(id)
+      .select('randomSeed')
+      .lean();
+    const existing = (sim as any)?.randomSeed;
+    if (typeof existing === 'number') return existing;
+    const seed = newSeed();
+    await this.simulationModel.updateOne(
+      { _id: id, randomSeed: { $in: [null, undefined] } },
+      { $set: { randomSeed: seed } },
+    );
+    const after = await this.simulationModel
+      .findById(id)
+      .select('randomSeed')
+      .lean();
+    return (after as any)?.randomSeed ?? seed;
+  }
+
   private async generateAndRecordDemand(
+    simulationId: Types.ObjectId,
+    quarter: number,
+    variability: number,
+    applySeasonality: boolean,
+    seasonalityConfig: any,
+  ): Promise<DemandData> {
+    return withSeed(await this.seedFor(simulationId), quarter, () =>
+      this.generateAndRecordDemandInner(
+        simulationId,
+        quarter,
+        variability,
+        applySeasonality,
+        seasonalityConfig,
+      ),
+    );
+  }
+
+  private async generateAndRecordDemandInner(
     simulationId: Types.ObjectId,
     quarter: number,
     variability: number,
@@ -1468,7 +1773,7 @@ export class SimulationService {
       seasonalMultiplier = seasonalityMap[calendarQuarter];
     }
 
-    const variabilityApplied = 1 + (Math.random() * 2 - 1) * variability;
+    const variabilityApplied = 1 + (draw('demand') * 2 - 1) * variability;
 
     const demandR1 = Math.round(
       M.TOTAL_MARKET_SIZE *
@@ -1526,8 +1831,26 @@ export class SimulationService {
     demandData: DemandData,
     features: FeatureFlags,
   ): Promise<QuarterResult> {
+    return withSeed(await this.seedFor(simulationId), quarter, () =>
+      this.runFirmQuarterWithVarianceInner(
+        simulationId,
+        firm,
+        quarter,
+        demandData,
+        features,
+      ),
+    );
+  }
+
+  private async runFirmQuarterWithVarianceInner(
+    simulationId: Types.ObjectId,
+    firm: FirmDocument,
+    quarter: number,
+    demandData: DemandData,
+    features: FeatureFlags,
+  ): Promise<QuarterResult> {
     const variance = CONFIG.preHistory.VARIANCE_RANGE;
-    const rand = () => 1 + (Math.random() * 2 - 1) * variance;
+    const rand = () => 1 + (draw('prehistory') * 2 - 1) * variance;
     const firmId = firm._id as Types.ObjectId;
 
     const prevState = await this.quarterStateModel
@@ -1969,7 +2292,7 @@ export class SimulationService {
     // Regional competition affects price sensitivity
     if (features.regionalCompetition) {
       // Apply regional weight adjustments (future: compare with competitors)
-      priceEffect *= 0.95 + Math.random() * 0.1;
+      priceEffect *= 0.95 + draw('price') * 0.1;
     }
 
     // Green score effect on demand (DA: not used — neutral effect)
@@ -2705,15 +3028,18 @@ export class SimulationService {
     const W = SUPPLIER_SCORECARD_CONFIG.WEIGHTS;
 
     // On-time delivery with variability
-    const onTimeRoll = Math.random();
+    const onTimeRoll = draw('supplier');
     const onTimeThreshold =
-      supplier.baseOnTime + (Math.random() * 2 - 1) * V.onTime;
+      supplier.baseOnTime + (draw('supplier') * 2 - 1) * V.onTime;
     const onTimeDelivery = onTimeRoll < onTimeThreshold;
 
     // Quality rate with variability
     const qualityRate = Math.min(
       1.0,
-      Math.max(0.0, supplier.baseQuality + (Math.random() * 2 - 1) * V.quality),
+      Math.max(
+        0.0,
+        supplier.baseQuality + (draw('supplier') * 2 - 1) * V.quality,
+      ),
     );
 
     // Cost index (normalized to 100 = baseline)
@@ -3129,6 +3455,17 @@ export class SimulationService {
     await this.updateKpiRanks(simulationId, quarter);
   }
 
+  private outcomesFor(simulationId: Types.ObjectId) {
+    return loadOutcomes(
+      {
+        kpiHistoryModel: this.kpiHistoryModel,
+        decisionModel: this.decisionModel,
+        simulationModel: this.simulationModel,
+      },
+      simulationId,
+    );
+  }
+
   private async updateKpiRanks(
     simulationId: Types.ObjectId,
     quarter: number,
@@ -3138,21 +3475,8 @@ export class SimulationService {
       .sort({ 'bsc.overall': -1 });
     for (let i = 0; i < kpis.length; i++) {
       kpis[i].bsc.rank = i + 1;
-      kpis[i].bsc.grade = this.getGrade(kpis[i].bsc.overall);
       await kpis[i].save();
     }
-  }
-
-  private getGrade(score: number): string {
-    return score >= 90
-      ? 'A'
-      : score >= 80
-        ? 'B'
-        : score >= 70
-          ? 'C'
-          : score >= 60
-            ? 'D'
-            : 'F';
   }
 
   // seasonIndex = this quarter's seasonal multiplier relative to the yearly
@@ -3329,10 +3653,7 @@ export class SimulationService {
       simulations.map(async (sim) => {
         const simId = sim._id as Types.ObjectId;
         const firms = await this.firmModel.find({ simulation: simId });
-        const enrollmentCount = await this.enrollmentModel.countDocuments({
-          simulation: simId,
-          status: EnrollmentStatus.ACTIVE,
-        });
+        const enrollmentCount = await this.countRealStudents(simId);
         return {
           ...sim.toObject(),
           firms: firms.map((f) => ({
@@ -3345,6 +3666,18 @@ export class SimulationService {
         };
       }),
     );
+  }
+
+  /** Active students in a course, leaving out test accounts. */
+  private async countRealStudents(simId: Types.ObjectId): Promise<number> {
+    const testUsers = await this.userModel.distinct('_id', {
+      isTestAccount: true,
+    });
+    return this.enrollmentModel.countDocuments({
+      simulation: simId,
+      status: EnrollmentStatus.ACTIVE,
+      user: { $nin: testUsers },
+    });
   }
 
   async findOne(simulationId: string): Promise<any> {
@@ -3627,6 +3960,7 @@ export class SimulationService {
                 id: decision._id,
                 status: decision.status,
                 submittedAt: decision.submittedAt,
+                submittedHow: decision.submittedHow ?? 'team',
                 forecastTotal:
                   decision.forecastR1 +
                   decision.forecastR2 +
@@ -3754,6 +4088,8 @@ export class SimulationService {
       .sort({ 'bsc.overall': -1 })
       .populate('firm', 'firmNumber name color');
 
+    const outcomes = await this.outcomesFor(simObjectId);
+
     const rankings = kpis.map((kpi, index) => ({
       rank: index + 1,
       firmId: (kpi.firm as any)?._id ?? null,
@@ -3765,7 +4101,7 @@ export class SimulationService {
       bscCustomer: kpi.bsc?.customer ?? null,
       bscProcess: kpi.bsc?.process ?? null,
       bscLearning: kpi.bsc?.learning ?? null,
-      grade: kpi.bsc?.grade ?? null,
+      outcome: outcomes.get(String((kpi.firm as any)?._id ?? '')) ?? null,
       csi: kpi.customer?.csi ?? null,
       marketShare: kpi.customer?.marketShare ?? null,
       revenue: kpi.financial?.revenue ?? null,
@@ -3903,7 +4239,6 @@ export class SimulationService {
                 bscCustomer: kpiHistory.bsc?.customer ?? null,
                 bscProcess: kpiHistory.bsc?.process ?? null,
                 bscLearning: kpiHistory.bsc?.learning ?? null,
-                grade: kpiHistory.bsc?.grade ?? null,
                 csi: kpiHistory.customer?.csi ?? null,
                 marketShare: kpiHistory.customer?.marketShare ?? null,
                 revenue: kpiHistory.financial?.revenue ?? null,
@@ -4092,6 +4427,7 @@ export class SimulationService {
       const user = await this.userModel.findById(student.studentId);
       if (!user)
         throw new NotFoundException(`User ${student.studentId} not found`);
+      assertCanEnrol(user, simulation);
 
       const existingEnrollment = await this.enrollmentModel.findOne({
         simulation: simObjectId,
@@ -5338,10 +5674,7 @@ export class SimulationService {
       simulations.map(async (sim) => {
         const simId = sim._id as Types.ObjectId;
         const firms = await this.firmModel.find({ simulation: simId });
-        const enrollmentCount = await this.enrollmentModel.countDocuments({
-          simulation: simId,
-          status: EnrollmentStatus.ACTIVE,
-        });
+        const enrollmentCount = await this.countRealStudents(simId);
         return {
           ...sim.toObject(),
           firms: firms.map((f) => ({
@@ -5602,10 +5935,16 @@ export class SimulationService {
         .lean();
       const firms = await this.firmModel.countDocuments({
         simulation: simObjectId,
+        referencePath: null,
+      });
+      const referenceIds = await this.firmModel.distinct('_id', {
+        simulation: simObjectId,
+        referencePath: { $ne: null },
       });
       const submitted = await this.decisionModel.distinct('firm', {
         simulation: simObjectId,
         quarter,
+        firm: { $nin: referenceIds },
         status: { $in: [DecisionStatus.SUBMITTED, DecisionStatus.PROCESSED] },
       });
       snapshot = {
@@ -5656,11 +5995,99 @@ export class SimulationService {
   }
 
   /**
+   * Writes each reference firm's decision for the open quarter as SUBMITTED,
+   * so a reference firm is never counted as missed. Does nothing in a course
+   * with no reference firms.
+   */
+  private async submitReferenceDecisions(
+    simObjectId: Types.ObjectId,
+  ): Promise<void> {
+    const sim: any = await this.simulationModel.findById(simObjectId);
+    if (!sim) return;
+    const refs = await this.firmModel.find({
+      simulation: simObjectId,
+      referencePath: { $ne: null },
+    });
+    if (refs.length === 0) return;
+    const quarter = sim.currentQuarter as number;
+    const calendar = ((quarter - 1) % 4) + 1;
+    const mult: Record<number, number> = {
+      1: sim.seasonality?.q1Multiplier ?? CONFIG.seasonality.QUARTERS[1],
+      2: sim.seasonality?.q2Multiplier ?? CONFIG.seasonality.QUARTERS[2],
+      3: sim.seasonality?.q3Multiplier ?? CONFIG.seasonality.QUARTERS[3],
+      4: sim.seasonality?.q4Multiplier ?? CONFIG.seasonality.QUARTERS[4],
+    };
+    const last = await this.demandHistoryModel
+      .findOne({ simulation: simObjectId, quarter: quarter - 1 })
+      .lean();
+    const open: Record<string, boolean> = {};
+    for (const id of ['ds', 'sa', 'ci', 'nd', 'pi', 'me'])
+      open[id] = Boolean(sim.isModuleUnlocked?.(id));
+    for (const firm of refs) {
+      if (!isReferencePath(firm.referencePath)) continue;
+      const state = await this.quarterStateModel
+        .findOne({
+          simulation: simObjectId,
+          firm: firm._id,
+          quarter: quarter - 1,
+        })
+        .lean();
+      const ctx: PathContext = {
+        quarter,
+        seasonalMultiplier:
+          sim.features?.seasonality === false ? 1 : mult[calendar],
+        lastActualDemand: last
+          ? {
+              r1: (last as any).demandR1,
+              r2: (last as any).demandR2,
+              r3: (last as any).demandR3,
+            }
+          : null,
+        marketShare:
+          (state as any)?.marketShare ??
+          1 / Math.max(1, (sim.numFirms as number) ?? 3),
+        open,
+      };
+      const fields = REFERENCE_PATHS[firm.referencePath].decide(ctx);
+      await this.decisionModel.updateOne(
+        { simulation: simObjectId, firm: firm._id, quarter },
+        {
+          $set: {
+            ...fields,
+            status: DecisionStatus.SUBMITTED,
+            submittedAt: new Date(),
+            submittedHow: 'reference',
+            modulesUnlockedAtSubmit: Object.entries(open)
+              .filter(([, v]) => v)
+              .map(([k]) => k),
+          },
+        },
+        { upsert: true },
+      );
+    }
+  }
+
+  /**
    * Process the current quarter and move to the next one. The caller must
    * hold the close claim (see claimQuarterClose); never call this directly.
    */
   private async processQuarterClose(simulationId: string): Promise<any> {
+    const sim = await this.simulationModel
+      .findById(this.toObjectId(simulationId))
+      .select('currentQuarter')
+      .lean();
+    if (!sim)
+      throw new NotFoundException(`Simulation ${simulationId} not found`);
+    return withSeed(
+      await this.seedFor(simulationId),
+      (sim as any).currentQuarter,
+      () => this.processQuarterCloseInner(simulationId),
+    );
+  }
+
+  private async processQuarterCloseInner(simulationId: string): Promise<any> {
     const simObjectId = this.toObjectId(simulationId);
+    await this.submitReferenceDecisions(simObjectId);
     const simulation = await this.simulationModel.findById(simObjectId);
 
     if (!simulation) {
@@ -5947,13 +6374,20 @@ export class SimulationService {
     // at sim creation; this keeps Q2..Qn aligned with the current
     // quarterDurationDays setting (which an admin may have changed).
     simulation.quarterStartedAt = new Date();
-    simulation.quarterEndsAt = quarterDeadline(
-      simulation.quarterStartedAt,
-      simulation.quarterDurationDays,
-      simulation.timezone || 'UTC',
-    );
+    // A practice course has no deadlines: quarters close only on Advance.
+    simulation.quarterEndsAt = simulation.isPractice
+      ? null
+      : quarterDeadline(
+          simulation.quarterStartedAt,
+          simulation.quarterDurationDays,
+          simulation.timezone || 'UTC',
+        );
 
     await simulation.save();
+
+    // The words about this close, written from the saved figures. A failure
+    // is logged inside and never fails or undoes the close.
+    await this.narratives?.buildSafely(simObjectId, previousQuarter);
 
     return {
       message: `Quarter advanced to ${simulation.currentQuarter}`,
@@ -6701,7 +7135,7 @@ export class SimulationService {
         quartersActive / CONFIG.market.EXPANSION_RAMP_UP_QUARTERS,
       );
       // Check for regulatory delay
-      if (Math.random() < EXP[5].regulatoryRisk) {
+      if (draw('expansion') < EXP[5].regulatoryRisk) {
         demand.r5 = 0; // Regulatory delay this quarter
       } else {
         demand.r5 = Math.round(EXP[5].marketSize * rampUp * EXP[5].culturalFit);
@@ -6723,7 +7157,7 @@ export class SimulationService {
         1,
         quartersActive / CONFIG.market.EXPANSION_RAMP_UP_QUARTERS,
       );
-      if (Math.random() < EXP[6].regulatoryRisk) {
+      if (draw('expansion') < EXP[6].regulatoryRisk) {
         demand.r6 = 0;
       } else {
         demand.r6 = Math.round(EXP[6].marketSize * rampUp * EXP[6].culturalFit);
@@ -8026,7 +8460,9 @@ export class SimulationService {
           learning: current.bsc.learning ?? 0,
           overall: current.bsc.overall ?? 0,
           rank: current.bsc.rank ?? null,
-          grade: current.bsc.grade ?? null,
+          outcome:
+            (await this.outcomesFor(simObjectId)).get(String(firmObjectId)) ??
+            null,
         }
       : null;
 
@@ -8105,6 +8541,7 @@ export class SimulationService {
     for (const k of kpiRecords) {
       kpiByFirm.set((k.firm as Types.ObjectId).toString(), k);
     }
+    const outcomes = await this.outcomesFor(simObjectId);
 
     // If no KPI records exist for any firm at this quarter, the requested
     // quarter hasn't been processed yet. Return an explicit empty state
@@ -8116,8 +8553,12 @@ export class SimulationService {
         hasData: false,
         message: `No engine output for Q${targetQuarter} yet.`,
         firms: [],
-        gradeThresholds: { A: 90, B: 80, C: 70, D: 0 },
-        perspectiveWeights: { financial: 0.25, customer: 0.25, process: 0.25, learning: 0.25 },
+        perspectiveWeights: {
+          financial: 0.25,
+          customer: 0.25,
+          process: 0.25,
+          learning: 0.25,
+        },
         leader: null,
       };
     }
@@ -8160,7 +8601,7 @@ export class SimulationService {
         techInvestmentMil: number;
       };
       overall: number;
-      grade: string;
+      outcome?: any;
       rank?: number;
     }> = [];
 
@@ -8245,15 +8686,6 @@ export class SimulationService {
 
       // ── OVERALL ────────────────────────────────────────────────────────
       const overall = (finScore + custScore + procScore + learnScore) / 4;
-      const grade =
-        overall >= 90
-          ? 'A'
-          : overall >= 80
-            ? 'B'
-            : overall >= 70
-              ? 'C'
-              : 'D';
-
       scoreResults.push({
         firmId: firmIdStr,
         firmNumber: firm.firmNumber,
@@ -8288,7 +8720,7 @@ export class SimulationService {
           techInvestmentMil: parseFloat(techInvestmentMil.toFixed(2)),
         },
         overall: parseFloat(overall.toFixed(1)),
-        grade,
+        outcome: outcomes.get(firmIdStr) ?? null,
       });
     }
 
@@ -8304,14 +8736,6 @@ export class SimulationService {
       s.rank = rankMap.get(s.firmId);
     });
 
-    // Thresholds reference (mirrors GAS color coding)
-    const gradeThresholds = {
-      A: 90,
-      B: 80,
-      C: 70,
-      D: 0,
-    };
-
     const perspectiveWeights = {
       financial: 0.25,
       customer: 0.25,
@@ -8324,7 +8748,6 @@ export class SimulationService {
       quarter: targetQuarter,
       hasData: true,
       firms: scoreResults,
-      gradeThresholds,
       perspectiveWeights,
       leader: sorted[0]
         ? { firmId: sorted[0].firmId, firmNumber: sorted[0].firmNumber, overall: sorted[0].overall }
@@ -8655,16 +9078,8 @@ export class SimulationService {
           'You can only request forecast accuracy for your own firm.',
         );
       }
-    } else if (user.role === UserRole.FACULTY) {
-      const isOwner = simulation.owner?.toString() === userId;
-      const isAssignedFaculty = ((simulation as any).facultyIds ?? []).some(
-        (facultyId: Types.ObjectId | string) => facultyId.toString() === userId,
-      );
-      if (!isOwner && !isAssignedFaculty) {
-        throw new ForbiddenException('You do not have access to this simulation.');
-      }
-    } else if (user.role !== UserRole.ADMIN) {
-      throw new ForbiddenException('You do not have access to this simulation.');
+    } else {
+      assertCourseAccess(user, simulation);
     }
 
     const allFirms = await this.firmModel
@@ -9106,6 +9521,8 @@ export class SimulationService {
   ): Promise<boolean> {
     // Only running sims have an active window
     if (simulation.status !== SimulationStatus.IN_PROGRESS) return false;
+    // A practice course has no deadlines: faculty advance its quarters.
+    if (simulation.isPractice) return false;
     if (!simulation.quarterEndsAt) return false;
     if (Date.now() < simulation.quarterEndsAt.getTime()) return false;
 
@@ -9123,6 +9540,7 @@ export class SimulationService {
         currentQuarter,
         'deadline',
         async () => {
+          await this.submitReferenceDecisions(simObjectId);
           // Who's missing?
           const firms = await this.firmModel.find({ simulation: simObjectId });
           const submittedFirmIds = await this.decisionModel.distinct('firm', {
@@ -9281,6 +9699,7 @@ export class SimulationService {
     if (existing && existing.status === DecisionStatus.DRAFT) {
       existing.status = DecisionStatus.SUBMITTED;
       existing.submittedAt = new Date();
+      existing.submittedHow = 'draft_promoted';
       // submittedBy left undefined — system-submitted, not user-submitted
       await existing.save();
       console.log(
@@ -9319,6 +9738,7 @@ export class SimulationService {
         quarter,
         status: DecisionStatus.SUBMITTED,
         submittedAt: new Date(),
+        submittedHow: 'baseline',
         // Schema defaults handle the rest
       });
       return;
@@ -9333,6 +9753,7 @@ export class SimulationService {
       laborCost, freightCost, actualProduction, unitsSold,
       submittedBy, submittedAt, processedAt,
       modulesUnlockedAtSubmit,
+      submittedHow,
       ...carryable
     } = prev as any;
 
@@ -9345,6 +9766,7 @@ export class SimulationService {
       quarter,
       status: DecisionStatus.SUBMITTED,
       submittedAt: new Date(),
+      submittedHow: 'carried_forward',
     });
 
     console.log(

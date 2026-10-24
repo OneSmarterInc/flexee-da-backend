@@ -13,6 +13,8 @@ import { OnboardingModule } from './modules/onboarding/onboarding.module';
 import { ReportingModule } from './modules/reporting/reporting.module';
 import { AiModule } from './modules/ai/ai.module';
 
+import { FacultyGuideModule } from './modules/faculty-guide/faculty-guide.module';
+
 @Module({
   imports: [
     ConfigModule.forRoot({
@@ -37,6 +39,7 @@ import { AiModule } from './modules/ai/ai.module';
     OnboardingModule,
     ReportingModule,
     AiModule,
+    FacultyGuideModule,
   ],
   controllers: [AppController],
   providers: [AppService],

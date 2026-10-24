@@ -53,8 +53,8 @@ type DemoModels = {
   StudentOnboardingModel: Model<any>;
 };
 
-async function upsertUser(UserModel: Model<any>, data: any) {
-  const passwordHash = await bcrypt.hash(PASSWORD, 10);
+async function upsertUser(UserModel: Model<any>, data: any, password: string = PASSWORD) {
+  const passwordHash = await bcrypt.hash(password, 10);
   return UserModel.findOneAndUpdate(
     { email: data.email.toLowerCase() },
     {
@@ -125,6 +125,8 @@ async function runSeeder() {
         email: {
           $in: [
             'faculty@flexeeda.com',
+            'faculty1@flexee.com',
+            'admin@flexee.com',
             'student1@flexeeda.com',
             'student2@flexeeda.com',
             'student3@flexeeda.com',
@@ -145,6 +147,24 @@ async function runSeeder() {
       role: UserRole.FACULTY,
       organization: 'FLEXEE DA',
     });
+
+    await upsertUser(UserModel, {
+      email: 'faculty1@flexee.com',
+      firstName: 'Faculty',
+      lastName: 'One',
+      displayName: 'Faculty One',
+      role: UserRole.FACULTY,
+      organization: 'FLEXEE DA',
+    }, 'Faculty@123456');
+
+    await upsertUser(UserModel, {
+      email: 'admin@flexee.com',
+      firstName: 'Admin',
+      lastName: 'User',
+      displayName: 'Admin User',
+      role: UserRole.ADMIN,
+      organization: 'FLEXEE DA',
+    }, 'Admin@123456');
 
     const students = await Promise.all([1, 2, 3].map((n) =>
       upsertUser(UserModel, {
@@ -220,6 +240,8 @@ async function runSeeder() {
 
     console.log('\nFLEXEE DA Slice 1 seed complete.');
     console.log(`Faculty: faculty@flexeeda.com / ${PASSWORD}`);
+    console.log('Faculty: faculty1@flexee.com / Faculty@123456');
+    console.log('Admin: admin@flexee.com / Admin@123456');
     console.log(`Students: student1@flexeeda.com, student2@flexeeda.com, student3@flexeeda.com / ${PASSWORD}`);
     console.log(`Faculty dashboard: ${FRONTEND_URL}/dashboard/faculty`);
     console.log(`Student login: ${FRONTEND_URL}/login`);

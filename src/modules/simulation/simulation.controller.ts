@@ -657,6 +657,39 @@ export class SimulationController {
   // DEPLOYMENT ENDPOINTS
   // ============================================================================
 
+  // ============================================================================
+  // PRACTICE COURSES (V3 Design E)
+  // ============================================================================
+
+  @Get(':simulationId/this-week')
+  @Roles(UserRole.FACULTY, UserRole.ADMIN)
+  @ApiOperation({
+    summary: 'The weekly work: the open quarter, its close time and each firm\'s submission status',
+  })
+  async getThisWeek(@Param('simulationId') simulationId: string, @Req() req: any) {
+    return this.simulationService.getThisWeek(req.user, simulationId);
+  }
+
+  @Post(':simulationId/practice')
+  @Roles(UserRole.FACULTY, UserRole.ADMIN)
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({
+    summary: 'Practise this course',
+    description:
+      'Creates a practice copy of the course: the same schedule, one firm for you and the three reference firms as competitors. No deadlines.',
+  })
+  async createPractice(@Param('simulationId') simulationId: string, @Req() req: any) {
+    return this.simulationService.createPractice(req.user, simulationId);
+  }
+
+  @Post(':simulationId/practice/reset')
+  @Roles(UserRole.FACULTY, UserRole.ADMIN)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Start a practice course over from Quarter 4' })
+  async resetPractice(@Param('simulationId') simulationId: string, @Req() req: any) {
+    return this.simulationService.resetPractice(req.user, simulationId);
+  }
+
   @Post(':simulationId/deploy')
   @Roles(UserRole.FACULTY, UserRole.ADMIN)
   @HttpCode(HttpStatus.OK)
@@ -1113,7 +1146,7 @@ export class SimulationController {
   @ApiOperation({
     summary: 'Get balanced scorecard for all firms',
     description:
-      'Retrieve comprehensive balanced scorecard (BSC) with four-perspective scoring: Financial, Customer, Process, and Learning & Growth. Includes scores, grades, rankings, and trend thresholds.',
+      'Retrieve comprehensive balanced scorecard (BSC) with four-perspective scoring: Financial, Customer, Process, and Learning & Growth. Includes scores, outcome, rankings, and trend thresholds.',
   })
   @ApiParam({ name: 'simulationId', description: 'Simulation ObjectId' })
   @ApiQuery({

@@ -30,6 +30,8 @@ import {
   Firm,
   FirmDocument,
   Simulation,
+  User,
+  UserDocument,
   SimulationDocument,
   SimulationStatus,
 } from '../../entities/index.entity';
@@ -243,6 +245,7 @@ export class ReportingViewsService {
     private readonly oauth: ReportingOAuthService,
     @InjectModel(AiCall.name) private readonly aiCalls: Model<AiCall>,
     private readonly ai: AiUseService,
+    @InjectModel(User.name) private readonly users: Model<UserDocument>,
   ) {}
 
   async run(name: string): Promise<Array<Record<string, unknown>>> {
@@ -265,8 +268,9 @@ export class ReportingViewsService {
   }
 
   private async allSims(): Promise<SimLean[]> {
+    // Practice runs are left out of every tool (the reporting contract's note).
     return this.sims
-      .find({})
+      .find({ isPractice: { $ne: true } })
       .select(
         'name institutionName status currentQuarter totalQuarters quarterStartedAt quarterEndsAt closingQuarter quarterSchedule deployedForStudentAt createdAt',
       )
@@ -283,6 +287,11 @@ export class ReportingViewsService {
     )
       return 'running';
     return sim.deployedForStudentAt ? 'running' : 'setting_up';
+  }
+
+  /** Ids of practice courses, whose closes and AI calls are left out. */
+  private practiceIds() {
+    return this.sims.distinct('_id', { isPractice: true });
   }
 
   private async firmCounts(): Promise<Map<string, number>> {
@@ -305,10 +314,16 @@ export class ReportingViewsService {
       ]);
       return new Map(rows.map((r) => [String(r._id), r.n]));
     };
+    // Test accounts are left out of every student count.
+    const testUsers = await this.users.distinct('_id', { isTestAccount: true });
     const enrolled = await countBySim({
       status: { $ne: EnrollmentStatus.DROPPED },
+      user: { $nin: testUsers },
     });
-    const confirmed = await countBySim({ status: EnrollmentStatus.ACTIVE });
+    const confirmed = await countBySim({
+      status: EnrollmentStatus.ACTIVE,
+      user: { $nin: testUsers },
+    });
     return sims.map((sim) => {
       const id = String(sim._id);
       const status = this.status(sim);
@@ -336,8 +351,9 @@ export class ReportingViewsService {
   private async quarters() {
     const sims = await this.allSims();
     const firms = await this.firmCounts();
+    const practice = await this.practiceIds();
     const logs = await this.closeLogs
-      .find({ status: 'succeeded' })
+      .find({ status: 'succeeded', simulationId: { $nin: practice } })
       .sort({ completedAt: 1 })
       .lean();
     const logKey = (simId: string, q: number) => `${simId}#${q}`;
@@ -419,8 +435,9 @@ export class ReportingViewsService {
 
   private async closes() {
     const since = new Date(Date.now() - 90 * 86_400_000);
+    const practice = await this.practiceIds();
     const logs = await this.closeLogs
-      .find({ completedAt: { $gte: since } })
+      .find({ completedAt: { $gte: since }, simulationId: { $nin: practice } })
       .sort({ completedAt: 1 })
       .lean();
     return logs.map((l) => ({
@@ -444,8 +461,11 @@ export class ReportingViewsService {
     const since = new Date(
       Date.UTC(start.getUTCFullYear(), start.getUTCMonth() - 11, 1),
     );
+    // Practice spend still counts toward the site ceiling (siteSpend), but
+    // practice courses are left out of this report like every other tool.
+    const practice = await this.practiceIds();
     const calls = await this.aiCalls
-      .find({ createdAt: { $gte: since } })
+      .find({ createdAt: { $gte: since }, simulationId: { $nin: practice } })
       .select(
         'simulationId course feature outcome sentencesDropped inputTokens outputTokens costUsd createdAt',
       )
@@ -512,6 +532,7 @@ export class ReportingViewsService {
       this.closeLogs.countDocuments({
         status: 'failed',
         completedAt: { $gt: new Date(Date.now() - 7 * 86_400_000) },
+        simulationId: { $nin: await this.practiceIds() },
       }),
       this.oauth.activeConnections(),
       this.ai.siteSpend(),

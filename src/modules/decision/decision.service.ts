@@ -33,6 +33,7 @@
 //   - DecisionResponseDto fields for stripped features removed entirely
 
 import {
+  ForbiddenException,
   Injectable,
   NotFoundException,
   BadRequestException,
@@ -41,6 +42,7 @@ import {
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
+import { assertCourseAccess } from '../simulation/course-access';
 import {
   Decision,
   DecisionDocument,
@@ -61,6 +63,7 @@ import {
   SUPPLIER_CONFIG,
   SupplierType,
   DC_CONFIG,
+  UserRole,
 } from '../../entities/index.entity';
 import {
   CreateDecisionDto,
@@ -74,6 +77,9 @@ import { MODULE_DECISION_FIELDS } from '../../lib/moduleDecisionMap';
 // Shown to students when a save arrives after the quarter's deadline.
 const QUARTER_CLOSED_MESSAGE = (quarter: number) =>
   `Quarter ${quarter} has closed, so this change was not saved. Reload the page to see the results and the next quarter.`;
+
+/** The person making a decision call: the JWT user. */
+export type DecidingUser = { _id?: unknown; role?: string };
 
 @Injectable()
 export class DecisionService {
@@ -94,6 +100,42 @@ export class DecisionService {
     @InjectModel(CreditHistory.name)
     private creditHistoryModel: Model<CreditHistoryDocument>,
   ) {}
+
+  // ============================================================================
+  // WHO CAN DECIDE (V3 Design E)
+  // ============================================================================
+
+  /**
+   * Nobody plays a reference firm. Faculty can decide only for their own firm
+   * in a practice course, never for a firm in a live course. Calls with no
+   * user (internal calls) are not checked.
+   */
+  private async assertCanDecide(
+    user: DecidingUser | undefined,
+    simulationId: Types.ObjectId | string,
+    firmId: Types.ObjectId | string,
+  ): Promise<void> {
+    if (!user) return;
+    const firm = await this.firmModel.findById(firmId).select('referencePath members').lean();
+    if ((firm as any)?.referencePath) {
+      throw new ForbiddenException('A reference firm plays a fixed path; nobody decides for it.');
+    }
+    if (user.role !== UserRole.FACULTY) return;
+    const sim = await this.simulationModel.findById(simulationId).select('isPractice owner facultyIds').lean();
+    if (!(sim as any)?.isPractice) {
+      throw new ForbiddenException('Faculty can submit decisions only in a practice course.');
+    }
+    assertCourseAccess(user as any, sim as any);
+    const enrolled = await this.enrollmentModel.exists({
+      simulation: simulationId,
+      firm: firmId,
+      user: user._id,
+      status: { $in: ['ACTIVE', 'PENDING'] },
+    });
+    if (!enrolled) {
+      throw new ForbiddenException('You can decide only for your own practice firm.');
+    }
+  }
 
   // ============================================================================
   // QUARTER CHECK — a decision can only change while its quarter is open
@@ -134,7 +176,8 @@ export class DecisionService {
   // CREATE DECISION (Draft)
   // ============================================================================
 
-  async create(dto: CreateDecisionDto): Promise<DecisionResponseDto> {
+  async create(dto: CreateDecisionDto, user?: DecidingUser): Promise<DecisionResponseDto> {
+    await this.assertCanDecide(user, dto.simulation, dto.firm);
     const existing = await this.decisionModel.findOne({
       firm: dto.firm,
       quarter: dto.quarter,
@@ -174,6 +217,7 @@ export class DecisionService {
   async update(
     id: string,
     dto: UpdateDecisionDto,
+    user?: DecidingUser,
   ): Promise<DecisionResponseDto> {
     const decisionId = new Types.ObjectId(id);
 
@@ -181,6 +225,7 @@ export class DecisionService {
     if (!decision) {
       throw new NotFoundException(`Decision ${id} not found`);
     }
+    await this.assertCanDecide(user, decision.simulation, decision.firm);
 
     // Guard: PROCESSED/LOCKED decisions can only have status changes (for reopening to DRAFT)
     if (decision.status === DecisionStatus.PROCESSED || decision.status === DecisionStatus.LOCKED) {
@@ -244,12 +289,13 @@ export class DecisionService {
   // SUBMIT DECISION
   // ============================================================================
 
-  async submit(id: string, userId?: string): Promise<DecisionResponseDto> {
+  async submit(id: string, userId?: string, user?: DecidingUser): Promise<DecisionResponseDto> {
     const decision = await this.decisionModel.findById(id);
 
     if (!decision) {
       throw new NotFoundException(`Decision ${id} not found`);
     }
+    await this.assertCanDecide(user, decision.simulation, decision.firm);
 
     if (decision.status !== DecisionStatus.DRAFT) {
       throw new BadRequestException(
@@ -331,6 +377,7 @@ export class DecisionService {
     const submittedFields: Record<string, unknown> = {
       status: DecisionStatus.SUBMITTED,
       submittedAt: new Date(),
+      submittedHow: 'team',
     };
     if (userId) {
       submittedFields.submittedBy = new Types.ObjectId(userId);

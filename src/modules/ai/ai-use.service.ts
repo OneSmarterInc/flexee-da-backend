@@ -78,6 +78,10 @@ export interface AiCallRecord {
   inputTokens: number;
   outputTokens: number;
   sentencesDropped?: number;
+  /** The model and prices of this call; default to the layer 4 settings. */
+  model?: string;
+  inputUsdPerMTok?: number;
+  outputUsdPerMTok?: number;
 }
 
 @Injectable()
@@ -124,12 +128,17 @@ export class AiUseService {
             : null,
         course: call.course,
         feature: call.feature,
-        model: this.settings.model,
+        model: call.model ?? this.settings.model,
         outcome: call.outcome,
         sentencesDropped: call.sentencesDropped ?? 0,
         inputTokens: call.inputTokens,
         outputTokens: call.outputTokens,
-        costUsd: callCost(call, this.settings),
+        costUsd: callCost(call, {
+          inputUsdPerMTok:
+            call.inputUsdPerMTok ?? this.settings.inputUsdPerMTok,
+          outputUsdPerMTok:
+            call.outputUsdPerMTok ?? this.settings.outputUsdPerMTok,
+        }),
       });
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);

@@ -11,6 +11,10 @@ import {
   TenQReportSchema,
   Firm,
   FirmSchema,
+  Decision,
+  DecisionSchema,
+  Simulation,
+  SimulationSchema,
 } from '../../entities/index.entity';
 
 @Module({
@@ -19,6 +23,8 @@ import {
       { name: KpiHistory.name, schema: KpiHistorySchema },
       { name: TenQReport.name, schema: TenQReportSchema },
       { name: Firm.name, schema: FirmSchema },
+      { name: Decision.name, schema: DecisionSchema },
+      { name: Simulation.name, schema: SimulationSchema },
     ]),
   ],
   controllers: [ReportsController, TenqReportController],

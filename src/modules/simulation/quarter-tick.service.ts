@@ -40,7 +40,7 @@
 //   Set CRON_QUARTER_TICK_ENABLED=false to turn off (useful for local dev
 //   and one-off scripts).
 
-import { Injectable, Logger, Inject, forwardRef } from '@nestjs/common';
+import { Injectable, Logger, Inject, Optional, forwardRef } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
@@ -70,6 +70,7 @@ export type SweepResult = {
   remindersSent: number;
 };
 import { SimulationService } from './simulation.service';
+import { NarrativesService } from '../narratives/narratives.service';
 
 @Injectable()
 export class QuarterTickService {
@@ -101,6 +102,8 @@ export class QuarterTickService {
     private readonly userModel: Model<UserDocument>,
     @InjectModel(SchedulerState.name)
     private readonly schedulerStateModel: Model<SchedulerState>,
+    // Rewords the quarter texts (Design D). Optional: a sweep never depends on it.
+    @Optional() private readonly narratives?: NarrativesService,
   ) {}
 
   /** The scheduler_state key the reporting connector reads. */
@@ -143,6 +146,13 @@ export class QuarterTickService {
     }
     const closes = await this.closeExpiredQuarters();
     const remindersSent = await this.sendDueReminders();
+    // Reword up to 10 pending texts; never lets a failure here stop the sweep.
+    try {
+      await this.narratives?.rewordPending();
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.logger.error(`[quarter-tick] rewording failed: ${message}`);
+    }
     return { ...closes, remindersSent };
   }
 
@@ -159,6 +169,8 @@ export class QuarterTickService {
     const candidates = await this.simulationModel
       .find({
         status: SimulationStatus.IN_PROGRESS,
+        // Practice courses have no deadlines: faculty close their quarters.
+        isPractice: { $ne: true },
         quarterEndsAt: { $lte: now },
         $or: [
           { lastSweptAt: { $exists: false } },
@@ -208,6 +220,7 @@ export class QuarterTickService {
     const due = await this.simulationModel
       .find({
         status: SimulationStatus.IN_PROGRESS,
+        isPractice: { $ne: true },
         quarterEndsAt: { $gt: now, $lte: horizon },
       })
       .select('_id currentQuarter reminderSentForQuarter')
@@ -288,6 +301,11 @@ export class QuarterTickService {
       );
       if (ok) sent += 1;
     }
+    // Kept so "This week" can say when the reminder went and to how many firms.
+    await this.simulationModel.updateOne(
+      { _id: sim._id },
+      { $set: { reminderSentAt: new Date(), reminderFirmCount: waitingFirmIds.length } },
+    );
     this.logger.log(
       `[quarter-tick] sim=${String(sim._id)} Q${quarter} reminders sent=${sent} of ${users.length}`,
     );

@@ -8,10 +8,39 @@ import {
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import * as bcrypt from 'bcrypt';
+import { randomBytes } from 'node:crypto';
 
 @Injectable()
 export class UsersService {
   constructor(@InjectModel(User.name) private userModel: Model<UserDocument>) {}
+
+  /**
+   * Admin: create test student accounts (V3 Design E). A test account can
+   * enrol only in a practice course and is left out of every student count.
+   * The generated passwords are returned once, here, and never stored in the
+   * clear.
+   */
+  async createTestAccounts(count: number): Promise<Array<{ email: string; password: string }>> {
+    const n = Math.min(Math.max(Math.floor(count) || 1, 1), 20);
+    const existing = await this.userModel.countDocuments({ isTestAccount: true });
+    const made: Array<{ email: string; password: string }> = [];
+    for (let i = 1; i <= n; i++) {
+      const email = `test-student-${existing + i}@flexee.test`;
+      const password = `T${randomBytes(9).toString('base64url')}9a`;
+      await this.userModel.create({
+        email,
+        firstName: 'Test',
+        lastName: `Student ${existing + i}`,
+        displayName: `Test Student ${existing + i}`,
+        passwordHash: await bcrypt.hash(password, 10),
+        role: UserRole.STUDENT,
+        isActive: true,
+        isTestAccount: true,
+      });
+      made.push({ email, password });
+    }
+    return made;
+  }
 
   /**
    * Get all users

@@ -30,6 +30,7 @@
 // where the deletion is obvious.
 
 import { Injectable } from '@nestjs/common';
+import { loadOutcomes } from './outcome.loader';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import {
@@ -39,6 +40,10 @@ import {
   TenQReportDocument,
   Firm,
   FirmDocument,
+  Decision,
+  DecisionDocument,
+  Simulation,
+  SimulationDocument,
 } from '../../entities/index.entity';
 
 @Injectable()
@@ -50,7 +55,22 @@ export class ReportsService {
     private tenqReportModel: Model<TenQReportDocument>,
     @InjectModel(Firm.name)
     private firmModel: Model<FirmDocument>,
+    @InjectModel(Decision.name)
+    private decisionModel: Model<DecisionDocument>,
+    @InjectModel(Simulation.name)
+    private simulationModel: Model<SimulationDocument>,
   ) {}
+
+  private outcomes(simulationId: Types.ObjectId) {
+    return loadOutcomes(
+      {
+        kpiHistoryModel: this.kpiHistoryModel,
+        decisionModel: this.decisionModel,
+        simulationModel: this.simulationModel,
+      },
+      simulationId,
+    );
+  }
 
   // ============================================================================
   // KPI HISTORY
@@ -114,6 +134,8 @@ export class ReportsService {
       quarter,
     });
 
+    const outcomes = await this.outcomes(simId);
+
     // Sorted peers — primary key is BSC overall, fall back to revenue
     const sortedByScore = [...allKpis].sort(
       (a, b) =>
@@ -151,7 +173,7 @@ export class ReportsService {
         // BSC
         score: kpi.bsc?.overall || 0,
         bscOverall: kpi.bsc?.overall || 0,
-        grade: kpi.bsc?.grade || '—',
+        outcome: outcomes.get(kpi.firm.toString()) ?? null,
       };
     });
 
@@ -213,10 +235,13 @@ export class ReportsService {
       return null;
     }
 
+    const outcomes = await this.outcomes(new Types.ObjectId(simulationId));
+
     return {
       quarter,
       firmId: firmId.toString(),
       scorecard: kpiData.bsc,
+      outcome: outcomes.get(firmId.toString()) ?? null,
       allMetrics: {
         financial: kpiData.financial,
         customer: kpiData.customer,
@@ -379,6 +404,8 @@ export class ReportsService {
     // Leaderboard: rank by latest BSC overall (with revenue fallback). Firms
     // with no data sit at the bottom with score=0 rather than being filtered
     // out — faculty can still see they exist.
+    const outcomes = await this.outcomes(simId);
+
     const leaderboard = [...firmSeries]
       .map(f => {
         const latest = f.latest;
@@ -388,7 +415,8 @@ export class ReportsService {
           name: f.name,
           color: f.color,
           score: latest?.bsc?.overall ?? 0,
-          grade: latest?.bsc?.grade ?? '—',
+          outcome: outcomes.get(f.firmId) ?? null,
+          missedQuarters: outcomes.get(f.firmId)?.missed ?? 0,
           revenue: latest?.financial?.revenue ?? 0,
           netIncome: latest?.financial?.netIncome ?? 0,
           marketShare: latest?.customer?.marketShare ?? 0,

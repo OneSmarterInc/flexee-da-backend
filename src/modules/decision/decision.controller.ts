@@ -134,8 +134,8 @@ export class DecisionController {
     description: 'Creates a new draft decision for a firm/quarter.',
   })
   @ApiResponse({ status: 201, description: 'Decision created' })
-  async create(@Body() dto: CreateDecisionDto): Promise<DecisionResponseDto> {
-    return this.decisionService.create(dto);
+  async create(@Body() dto: CreateDecisionDto, @Req() req?: any): Promise<DecisionResponseDto> {
+    return this.decisionService.create(dto, req?.user);
   }
 
   // ============================================================================
@@ -151,8 +151,9 @@ export class DecisionController {
   async update(
     @Param('id') id: string,
     @Body() dto: UpdateDecisionDto,
+    @Req() req?: any,
   ): Promise<DecisionResponseDto> {
-    return this.decisionService.update(id, dto);
+    return this.decisionService.update(id, dto, req?.user);
   }
 
   // ============================================================================
@@ -172,7 +173,7 @@ export class DecisionController {
     @Req() req?: any,
   ): Promise<DecisionResponseDto> {
     const submittedBy = userId || req?.user?._id;
-    return this.decisionService.submit(id, submittedBy);
+    return this.decisionService.submit(id, submittedBy, req?.user);
   }
 
   // ============================================================================

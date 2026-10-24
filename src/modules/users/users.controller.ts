@@ -44,6 +44,18 @@ export class UsersController {
     return this.usersService.findAll();
   }
 
+  @Post('test-accounts')
+  @Roles(UserRole.ADMIN)
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({
+    summary: 'Create test student accounts (Admin only)',
+    description:
+      'A test account can enrol only in a practice course and is left out of every student count. The passwords are returned once.',
+  })
+  async createTestAccounts(@Body() body: { count?: number }) {
+    return { accounts: await this.usersService.createTestAccounts(Number(body?.count ?? 1)) };
+  }
+
   /**
    * Add a new faculty user (Admin only)
    */

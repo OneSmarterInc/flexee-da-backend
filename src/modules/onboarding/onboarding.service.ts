@@ -37,6 +37,7 @@ import {
   AcceptInviteResponseDto,
 } from './dto';
 import { sendStudentInviteEmail } from '../../utils/email.util';
+import { assertCanEnrolById } from '../simulation/enroll-rules';
 
 @Injectable()
 export class OnboardingService {
@@ -551,6 +552,8 @@ export class OnboardingService {
       user: user._id,
     });
 
+    await assertCanEnrolById(this.userModel, this.simulationModel, user._id as Types.ObjectId, invite.simulation as Types.ObjectId);
+
     if (!enrollment) {
       // Create enrollment without firm initially
       // firm is undefined — populated later when faculty assigns the student to a team
@@ -992,6 +995,8 @@ export class OnboardingService {
         lastName: newUser.lastName,
       };
     }
+
+    await assertCanEnrolById(this.userModel, this.simulationModel, userId, regLink.simulation as Types.ObjectId);
 
     // ── Create enrollment (same for both new and existing users) ────────────
     const enrollment = await this.enrollmentModel.create({

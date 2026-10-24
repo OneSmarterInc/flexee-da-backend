@@ -45,8 +45,11 @@ import {
   StudentOnboardingSchema,
 } from '../../entities/index.entity';
 
+import { NarrativesModule } from '../narratives/narratives.module';
+
 @Module({
   imports: [
+    NarrativesModule,
     MongooseModule.forFeature([
       { name: Simulation.name, schema: SimulationSchema },
       { name: Firm.name, schema: FirmSchema },

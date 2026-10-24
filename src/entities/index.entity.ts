@@ -460,10 +460,37 @@ export class Simulation {
   @Prop({ type: Number, default: null })
   reminderSentForQuarter!: number | null;
 
+  // When that reminder went out, and to how many firms (for "This week").
+  @Prop({ type: Date, default: null })
+  reminderSentAt?: Date | null;
+
+  @Prop({ type: Number, default: null })
+  reminderFirmCount?: number | null;
+
   // The course's AI switch (V3 layer 4). Off means no AI features run for
   // this course, whatever the site's ceiling.
   @Prop({ default: true })
   aiEnabled!: boolean;
+
+  // Ask Claude questions this course may ask each month. Unset means the
+  // site setting (FLEXEE_ASK_QUESTIONS_PER_MONTH).
+  @Prop({ type: Number, default: null })
+  askQuestionsPerMonth?: number | null;
+
+  // Seed for this course's random draws, so a quarter can be replayed with
+  // the same numbers (V3 Design E). Set at creation; older courses get one at
+  // their next close.
+  @Prop({ type: Number, default: null })
+  randomSeed?: number | null;
+
+  // A practice course: an ordinary course faculty play before students do,
+  // with no deadlines, left out of every count of live courses (V3 Design E).
+  @Prop({ type: Boolean, default: false, index: true })
+  isPractice!: boolean;
+
+  // The live course a practice course was copied from.
+  @Prop({ type: Types.ObjectId, default: null })
+  practiceOf?: Types.ObjectId | null;
 }
 
 export const SimulationSchema = SchemaFactory.createForClass(Simulation);
@@ -521,6 +548,11 @@ export class Firm {
 
   @Prop({ type: [Types.ObjectId], ref: 'User', default: [] })
   members!: Types.ObjectId[];
+
+  // Set on a reference firm: nobody logs in to it, and at each close the
+  // named path's decision is written for it (V3 Design E).
+  @Prop({ type: String, default: null })
+  referencePath?: string | null;
 
   @Prop({ default: '#3B82F6' })
   color!: string;
@@ -691,6 +723,11 @@ export class Decision {
 
   @Prop({ enum: DecisionStatus, default: DecisionStatus.DRAFT })
   status!: DecisionStatus;
+
+  // How this decision came to be submitted. Only carried_forward and baseline
+  // count as a missed quarter. Documents from before this field read as team.
+  @Prop({ enum: ['team', 'draft_promoted', 'carried_forward', 'baseline', 'reference'], default: 'team' })
+  submittedHow!: string;
 
   // ds — DEMAND SCIENCE
   @Prop({ default: 80000 })  forecastR1!: number;
@@ -1185,6 +1222,11 @@ export class User {
   @Prop({ default: true })
   isActive!: boolean;
 
+  // A test student account: can enrol only in a practice course, and is left
+  // out of every student count (V3 Design E).
+  @Prop({ type: Boolean, default: false })
+  isTestAccount!: boolean;
+
   @Prop()
   avatarUrl?: string;
 
@@ -1260,6 +1302,11 @@ export class Enrollment {
   // Extended payment date for this student (faculty can extend individual deadlines)
   @Prop({ type: Date, default: null })
   paymentExtendedDate?: Date | null;
+
+  // The latest closed quarter this student has seen on their dashboard, for
+  // the "While you were away" card (V3 Design E).
+  @Prop({ type: Number, default: null })
+  lastSeenQuarter?: number | null;
 }
 
 export const EnrollmentSchema = SchemaFactory.createForClass(Enrollment);
