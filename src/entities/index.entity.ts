@@ -230,7 +230,18 @@ export class PerfectOrderComponents {
   @Prop({ default: 0.84 })  overall!: number;
 }
 
-@Schema({ _id: false })
+// Courses made before outcomes replaced grades still have bsc.grade stored.
+// It is never sent: nothing reads it, and students must not see an A to F.
+const dropGrade = (_doc: unknown, ret: Record<string, unknown>) => {
+  delete ret.grade;
+  return ret;
+};
+
+@Schema({
+  _id: false,
+  toJSON: { transform: dropGrade },
+  toObject: { transform: dropGrade },
+})
 export class BalancedScorecard {
   @Prop({ default: 0 })  financial!: number;
   @Prop({ default: 0 })  customer!: number;
@@ -238,7 +249,6 @@ export class BalancedScorecard {
   @Prop({ default: 0 })  learning!: number;
   @Prop({ default: 0 })  overall!: number;
   @Prop({ default: 0 })  rank!: number;
-  @Prop()                grade?: string;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -728,6 +738,12 @@ export class Decision {
   // count as a missed quarter. Documents from before this field read as team.
   @Prop({ enum: ['team', 'draft_promoted', 'carried_forward', 'baseline', 'reference'], default: 'team' })
   submittedHow!: string;
+
+  // False on a draft made only by opening the cockpit; true once the team has
+  // saved something. Older documents have no value and count as the team's.
+  // At the close, only a draft the team worked on is promoted as played.
+  @Prop({ type: Boolean })
+  editedByTeam?: boolean;
 
   // ds — DEMAND SCIENCE
   @Prop({ default: 80000 })  forecastR1!: number;

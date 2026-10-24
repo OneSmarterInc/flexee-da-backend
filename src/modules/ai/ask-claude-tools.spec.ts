@@ -235,4 +235,40 @@ describeDb('Ask Claude lookups', () => {
     tools.run('show_table', { measures: ['cash'] });
     expect(tools.views).toHaveLength(1);
   });
+
+  it('get_readings returns the engine text, never the rewording, and has a summary line', async () => {
+    const a = await seedCourse('Course A', 1);
+    await conn.collection('narratives').insertMany([
+      {
+        simulationId: a.simId,
+        firmId: null,
+        quarter: 5,
+        kind: 'reading',
+        key: '',
+        engineText: 'Quarter 5 engine text.',
+        text: 'Reworded.',
+      },
+      {
+        simulationId: a.simId,
+        firmId: null,
+        quarter: 6,
+        kind: 'reading',
+        key: '',
+        engineText: 'Quarter 6 engine text.',
+        text: null,
+      },
+    ]);
+    const tools = new AskClaudeTools(await svc.loadCourse(a.sim));
+    const r = tools.run('get_readings', {});
+    expect(r.error).toBeUndefined();
+    expect(r.readings).toEqual([
+      { quarter: 6, reading: 'Quarter 6 engine text.' },
+      { quarter: 5, reading: 'Quarter 5 engine text.' },
+    ]);
+    expect(JSON.stringify(r)).not.toContain('Reworded');
+    expect(tools.summary('get_readings', r)).toBe(
+      'the written readings, 2 quarters',
+    );
+    expect(tools.definitions().map((d) => d.name)).toContain('get_readings');
+  });
 });

@@ -69,6 +69,18 @@ export function rewordCheck(
   for (const f of figures([reworded])) {
     if (!allowed.has(f)) return { ok: false, reason: 'figure' };
   }
+  // Digits inside names count too: "Q9" is as much an invention as "9" when
+  // the engine text says "Q8", "Region 2" or "P1".
+  const digitRuns = (text: string) =>
+    new Set(
+      [...text.matchAll(/\d[\d,]*(?:\.\d+)?/g)].map((m) =>
+        normaliseFigure(m[0]),
+      ),
+    );
+  const engineDigits = digitRuns(engine);
+  for (const d of digitRuns(reworded)) {
+    if (!engineDigits.has(d)) return { ok: false, reason: 'figure' };
+  }
   const allowedWords = numberWords(engine);
   if ([...numberWords(reworded)].some((w) => !allowedWords.has(w))) {
     return { ok: false, reason: 'number_word' };

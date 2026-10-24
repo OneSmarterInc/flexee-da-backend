@@ -234,8 +234,8 @@ export class AskClaudeService {
     if (state === 'off_ceiling') throw new AskRefused(REFUSALS.off_ceiling);
     if (question === '' || question.length > 1000)
       throw new AskRefused(REFUSALS.length);
-    if ((await this.questionsLeft(sim._id as Types.ObjectId, sim)) === 0)
-      throw new AskRefused(REFUSALS.allowance);
+    const leftBefore = await this.questionsLeft(sim._id as Types.ObjectId, sim);
+    if (leftBefore === 0) throw new AskRefused(REFUSALS.allowance);
 
     const history = await this.history(
       input.userId,
@@ -363,7 +363,12 @@ export class AskClaudeService {
       dropped: check.dropped,
       lookups,
       checked: check.checked,
-      questionsLeft: await this.questionsLeft(sim._id as Types.ObjectId, sim),
+      // The answer is saved and counted by now: a database blip here must not
+      // turn it into an error.
+      questionsLeft: await this.questionsLeft(
+        sim._id as Types.ObjectId,
+        sim,
+      ).catch(() => Math.max(0, leftBefore - 1)),
       tables: tools.views,
     };
   }

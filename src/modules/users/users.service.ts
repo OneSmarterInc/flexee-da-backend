@@ -22,16 +22,25 @@ export class UsersService {
    */
   async createTestAccounts(count: number): Promise<Array<{ email: string; password: string }>> {
     const n = Math.min(Math.max(Math.floor(count) || 1, 1), 20);
-    const existing = await this.userModel.countDocuments({ isTestAccount: true });
+    // Numbered from the highest in use, and checked, so a deleted account's
+    // number is never reused by a clash.
+    let next =
+      (await this.userModel.countDocuments({ isTestAccount: true })) + 1;
     const made: Array<{ email: string; password: string }> = [];
     for (let i = 1; i <= n; i++) {
-      const email = `test-student-${existing + i}@flexee.test`;
+      let email = `test-student-${next}@flexee.test`;
+      while (await this.userModel.exists({ email })) {
+        next += 1;
+        email = `test-student-${next}@flexee.test`;
+      }
+      const number = next;
+      next += 1;
       const password = `T${randomBytes(9).toString('base64url')}9a`;
       await this.userModel.create({
         email,
         firstName: 'Test',
-        lastName: `Student ${existing + i}`,
-        displayName: `Test Student ${existing + i}`,
+        lastName: `Student ${number}`,
+        displayName: `Test Student ${number}`,
         passwordHash: await bcrypt.hash(password, 10),
         role: UserRole.STUDENT,
         isActive: true,

@@ -203,6 +203,7 @@ export class DecisionService {
       simulation: new Types.ObjectId(dto.simulation),
       firm: new Types.ObjectId(dto.firm),
       status: DecisionStatus.DRAFT,
+      editedByTeam: true,
     });
 
     const saved = await decision.save();
@@ -272,7 +273,7 @@ export class DecisionService {
       changesData || resubmits
         ? { _id: decisionId, quarterClosed: { $ne: true } }
         : { _id: decisionId },
-      { $set: sanitizedDto },
+      { $set: changesData ? { ...sanitizedDto, editedByTeam: true } : sanitizedDto },
       { new: true, runValidators: false },
     );
 
@@ -467,6 +468,8 @@ export class DecisionService {
         firm: new Types.ObjectId(firmId),
         quarter,
         status: DecisionStatus.DRAFT,
+        // Opening the cockpit makes a draft; it isn't the team's work yet.
+        editedByTeam: false,
         ...this.buildDecisionDefaults(prevDecision),
       });
 
@@ -1242,6 +1245,7 @@ export class DecisionService {
           firm: new Types.ObjectId(firmId),
           quarter,
           status: DecisionStatus.DRAFT,
+          editedByTeam: false,
           ...this.buildDecisionDefaults(prevDecision),
         },
       },

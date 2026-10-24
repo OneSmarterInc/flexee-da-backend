@@ -145,20 +145,7 @@ describeDb('narratives', () => {
         });
       }
     }
-    await conn.collection('quarter_close_logs').insertOne({
-      simulationId: _id,
-      course: 'Spring 2027',
-      quarter: 7,
-      source: 'deadline',
-      status: 'succeeded',
-      startedAt: new Date(),
-      completedAt: new Date(),
-      seconds: 1,
-      firms: 2,
-      firmsSubmitted: 1,
-      firmsCarriedForward: 1,
-      createdAt: new Date(),
-    });
+    // No close log is written: the close log comes after the texts are built.
     return { _id, firms };
   }
 
@@ -294,6 +281,56 @@ describeDb('narratives', () => {
       await svc.rewordPending();
       expect(await Narr.countDocuments({ rewordOutcome: 'error' })).toBe(3);
       expect(await Calls.countDocuments({ outcome: 'error' })).toBe(3);
+    });
+
+    it('two overlapping sweeps reword each text once', async () => {
+      const c = await course();
+      await svc.buildQuarter(c._id, 7);
+      claude.mockImplementation(async (_s: string, user: string) => {
+        await new Promise((r) => setTimeout(r, 20));
+        return ok(user.split('ENGINE_TEXT: ')[1]);
+      });
+      await Promise.all([svc.rewordPending(), svc.rewordPending()]);
+      expect(claude).toHaveBeenCalledTimes(3);
+      expect(await Calls.countDocuments({})).toBe(3);
+    });
+
+    it('a rebuild during rewording keeps the new engine text and is not overwritten', async () => {
+      const c = await course();
+      await svc.buildQuarter(c._id, 7);
+      claude.mockImplementation(async (_s: string, user: string) => {
+        // The close is rebuilt while Claude is still working.
+        await svc.buildQuarter(c._id, 7);
+        await Narr.updateMany(
+          {},
+          { $set: { engineText: 'The new engine text.' } },
+        );
+        return ok(user.split('ENGINE_TEXT: ')[1]);
+      });
+      await svc.rewordPending();
+      const rows: any[] = await Narr.find({}).lean();
+      expect(rows.every((r) => r.text === null || r.text === undefined)).toBe(
+        true,
+      );
+      expect(rows.every((r) => r.rewordOutcome !== 'kept')).toBe(true);
+    });
+
+    it('takes back a claim that went stale', async () => {
+      const c = await course();
+      await Narr.create({
+        simulationId: c._id,
+        firmId: null,
+        quarter: 3,
+        kind: 'reading',
+        engineText: 'Quarter 3 closed.',
+        rewordOutcome: 'working',
+        rewordClaimedAt: new Date(Date.now() - 3_600_000),
+      });
+      claude.mockImplementation(async (_s: string, user: string) =>
+        ok(user.split('ENGINE_TEXT: ')[1]),
+      );
+      await svc.rewordPending();
+      expect(await Narr.countDocuments({ rewordOutcome: 'kept' })).toBe(1);
     });
 
     it('rewords at most 10 per run, oldest first', async () => {

@@ -9,19 +9,19 @@ import { runReferenceCourse, startApp } from './helpers/reference-run';
 
 const PINNED = {
   model_forecaster: {
-    scores: { financial: 100, customer: 96.4, process: 91.1, learning: 80 },
+    scores: { financial: 100, customer: 96.3, process: 91, learning: 80 },
     outcome: 'All four perspectives met',
     marketShare: 0.323,
     grossMargin: 57,
   },
   own_estimate_forecaster: {
-    scores: { financial: 100, customer: 96.7, process: 90, learning: 54.2 },
+    scores: { financial: 100, customer: 96.7, process: 90.1, learning: 54.2 },
     outcome: 'Three of four perspectives met',
     marketShare: 0.334,
     grossMargin: 56.5,
   },
   price_cutter: {
-    scores: { financial: 100, customer: 96.3, process: 82.2, learning: 80 },
+    scores: { financial: 100, customer: 96.3, process: 82.1, learning: 80 },
     outcome: 'All four perspectives met',
     marketShare: 0.343,
     grossMargin: 48.5,

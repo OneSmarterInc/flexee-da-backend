@@ -1011,7 +1011,26 @@ export class SimulationService {
       throw new BadRequestException(
         'Only a practice course can be started over.',
       );
+    // Take the same claim a close takes: Start over refuses while a quarter is
+    // closing, and an Advance can't start while it runs.
+    const quarter = sim.currentQuarter;
+    if (!(await this.claimQuarterClose(id, quarter))) {
+      throw new ConflictException(
+        'A quarter is closing right now. Try again in a minute.',
+      );
+    }
+    try {
+      return await this.doResetPractice(id, sim, simulationId);
+    } finally {
+      await this.releaseQuarterClose(id, quarter);
+    }
+  }
 
+  private async doResetPractice(
+    id: Types.ObjectId,
+    sim: SimulationDocument,
+    simulationId: string,
+  ): Promise<any> {
     await Promise.all([
       this.quarterStateModel.deleteMany({ simulation: id }),
       this.demandHistoryModel.deleteMany({ simulation: id }),
@@ -1839,6 +1858,7 @@ export class SimulationService {
         demandData,
         features,
       ),
+      `firm${firm.firmNumber}`,
     );
   }
 
@@ -3666,6 +3686,30 @@ export class SimulationService {
         };
       }),
     );
+  }
+
+  /** Admin, or faculty who own the course or are in its facultyIds; everyone else gets 403. */
+  async assertAccess(user: { _id: unknown; role?: string }, simulationId: string): Promise<void> {
+    const sim = await this.simulationModel
+      .findById(this.toObjectId(simulationId))
+      .select('owner facultyIds')
+      .lean();
+    if (!sim) throw new NotFoundException(`Simulation ${simulationId} not found`);
+    assertCourseAccess(user as any, sim as any);
+  }
+
+  /** The firm an active student is on in this course, or null. */
+  async studentFirmId(simulationId: string, userId: unknown): Promise<string | null> {
+    const e = await this.enrollmentModel
+      .findOne({
+        simulation: this.toObjectId(simulationId),
+        user: this.toObjectId(String(userId)),
+        status: { $in: [EnrollmentStatus.ACTIVE, EnrollmentStatus.COMPLETED] },
+        firm: { $ne: null },
+      })
+      .select('firm')
+      .lean();
+    return e?.firm ? String(e.firm) : null;
   }
 
   /** Active students in a course, leaving out test accounts. */
@@ -6143,7 +6187,7 @@ export class SimulationService {
         });
 
         let action: 'CARRY_FORWARD' | 'BASELINE' | 'PROMOTED_DRAFT';
-        if (existing?.status === DecisionStatus.DRAFT) {
+        if (existing?.status === DecisionStatus.DRAFT && existing.editedByTeam !== false) {
           action = 'PROMOTED_DRAFT';
         } else if (prev) {
           action = 'CARRY_FORWARD';
@@ -9690,11 +9734,18 @@ export class SimulationService {
   ): Promise<void> {
     // Is there a draft already? If so, promote it as-is. The student saved
     // draft work; respect it.
-    const existing = await this.decisionModel.findOne({
+    let existing = await this.decisionModel.findOne({
       simulation: simulationId,
       firm: firmId,
       quarter,
     });
+
+    // A draft nobody saved (the cockpit made it when the page opened) is not
+    // the team's work: drop it and carry last quarter's decision forward.
+    if (existing && existing.status === DecisionStatus.DRAFT && existing.editedByTeam === false) {
+      await this.decisionModel.deleteOne({ _id: existing._id });
+      existing = null;
+    }
 
     if (existing && existing.status === DecisionStatus.DRAFT) {
       existing.status = DecisionStatus.SUBMITTED;

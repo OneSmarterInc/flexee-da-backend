@@ -56,3 +56,13 @@ describe('seeded random numbers', () => {
     expect(src).not.toContain('Math.random(');
   });
 });
+
+describe('scopes', () => {
+  it('two scopes of the same quarter draw different numbers; the same scope draws the same', () => {
+    const a = withSeed(1, 4, () => [draw('prehistory'), draw('prehistory')], 'firm1');
+    const b = withSeed(1, 4, () => [draw('prehistory'), draw('prehistory')], 'firm2');
+    const a2 = withSeed(1, 4, () => [draw('prehistory'), draw('prehistory')], 'firm1');
+    expect(a).not.toEqual(b);
+    expect(a2).toEqual(a);
+  });
+});

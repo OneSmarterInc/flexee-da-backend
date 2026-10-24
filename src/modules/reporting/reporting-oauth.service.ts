@@ -74,7 +74,7 @@ const daysFromNow = (d: number) => new Date(Date.now() + d * 86_400_000);
 
 /** The connector's MCP address. */
 export function resourceUrl(urls: Urls) {
-  return `${urls.api}/mcp/reporting`;
+  return `${urls.api}/api/mcp/reporting`;
 }
 
 /** RFC 9728 */

@@ -15,6 +15,8 @@ import {
   DecisionSchema,
   Simulation,
   SimulationSchema,
+  Enrollment,
+  EnrollmentSchema,
 } from '../../entities/index.entity';
 
 @Module({
@@ -25,6 +27,7 @@ import {
       { name: Firm.name, schema: FirmSchema },
       { name: Decision.name, schema: DecisionSchema },
       { name: Simulation.name, schema: SimulationSchema },
+      { name: Enrollment.name, schema: EnrollmentSchema },
     ]),
   ],
   controllers: [ReportsController, TenqReportController],

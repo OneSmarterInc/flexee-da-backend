@@ -36,12 +36,16 @@ export function newSeed(): number {
   return Math.floor(Math.random() * 4294967296);
 }
 
-type Store = { seed: number; quarter: number; streams: Map<string, () => number> };
+type Store = { seed: number; quarter: number; scope: string; streams: Map<string, () => number> };
 const als = new AsyncLocalStorage<Store>();
 
-/** Run `fn` with this course's seed in force for the given quarter. */
-export function withSeed<T>(seed: number, quarter: number, fn: () => T): T {
-  return als.run({ seed, quarter, streams: new Map() }, fn);
+/**
+ * Run `fn` with this course's seed in force for the given quarter. A `scope`
+ * (for example one firm) gives every stream inside it its own sequence, so
+ * two scopes of the same quarter don't draw the same numbers.
+ */
+export function withSeed<T>(seed: number, quarter: number, fn: () => T, scope = ''): T {
+  return als.run({ seed, quarter, scope, streams: new Map() }, fn);
 }
 
 /**
@@ -51,10 +55,11 @@ export function withSeed<T>(seed: number, quarter: number, fn: () => T): T {
 export function draw(stream: string): number {
   const store = als.getStore();
   if (!store) return Math.random();
-  let g = store.streams.get(stream);
+  const key = store.scope ? `${store.scope}:${stream}` : stream;
+  let g = store.streams.get(key);
   if (!g) {
-    g = rngFor(store.seed, store.quarter, stream);
-    store.streams.set(stream, g);
+    g = rngFor(store.seed, store.quarter, key);
+    store.streams.set(key, g);
   }
   return g();
 }

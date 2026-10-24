@@ -46,6 +46,7 @@ import { readingFor } from './reading';
 import { rewordCheck } from './reword-check';
 
 export const REWORD_BATCH = 10;
+const REWORD_CLAIM_MINUTES = 15;
 const FEATURE: Record<NarrativeKind, AiFeature> = {
   reading: 'readings',
   explanation: 'team_explanations',
@@ -138,6 +139,7 @@ export class NarrativesService {
           engineText: row.engineText,
           text: null,
           rewordOutcome: 'pending',
+          rewordClaimedAt: null,
         },
       },
       { upsert: true },
@@ -156,7 +158,7 @@ export class NarrativesService {
       .find({ simulation: simId })
       .sort({ firmNumber: 1 })
       .lean()) as any[];
-    const [demand, prevDemand, forecasts, kpis, decisions, impacts, closeLog] =
+    const [demand, prevDemand, forecasts, kpis, decisions, impacts] =
       await Promise.all([
         this.demandModel.findOne({ simulation: simId, quarter }).lean(),
         this.demandModel
@@ -170,11 +172,27 @@ export class NarrativesService {
           .find({ simulation: simId, quarter: { $in: [quarter, quarter - 1] } })
           .lean(),
         this.impactModel.find({ simulation: simId, quarter }).lean(),
-        this.closeLogModel
-          .findOne({ simulationId: simId, quarter })
-          .sort({ createdAt: -1 })
-          .lean(),
       ]);
+    // Who submitted, from the decisions themselves: the close log is written
+    // after the texts are built. Reference firms are not teams.
+    const teamIds = new Set(
+      firms.filter((f) => !f.referencePath).map((f) => String(f._id)),
+    );
+    const thisQuarter = (decisions as any[]).filter(
+      (d) => d.quarter === quarter && teamIds.has(String(d.firm)),
+    );
+    const carried = thisQuarter.filter(
+      (d) =>
+        d.submittedHow === 'carried_forward' || d.submittedHow === 'baseline',
+    ).length;
+    const close =
+      thisQuarter.length > 0
+        ? {
+            firms: teamIds.size,
+            submitted: teamIds.size - carried,
+            carriedForward: carried,
+          }
+        : null;
     const regions = (d: any) =>
       d ? { r1: d.demandR1, r2: d.demandR2, r3: d.demandR3 } : null;
     const eventIds = [
@@ -226,13 +244,7 @@ export class NarrativesService {
         effect: e.effect,
         firms: e.firms.size,
       })),
-      close: closeLog
-        ? {
-            firms: (closeLog as any).firms,
-            submitted: (closeLog as any).firmsSubmitted,
-            carriedForward: (closeLog as any).firmsCarriedForward,
-          }
-        : null,
+      close,
       opensNext: modules
         .filter(
           (m) =>
@@ -663,10 +675,33 @@ export class NarrativesService {
 
   /** Rewords up to `limit` pending texts, oldest first. Returns how many were handled. */
   async rewordPending(limit = REWORD_BATCH): Promise<number> {
-    const pending = await this.narratives
-      .find({ rewordOutcome: 'pending' })
+    const stale = new Date(Date.now() - REWORD_CLAIM_MINUTES * 60_000);
+    const candidates = await this.narratives
+      .find({
+        $or: [
+          { rewordOutcome: 'pending' },
+          { rewordOutcome: 'working', rewordClaimedAt: { $lt: stale } },
+        ],
+      })
       .sort({ createdAt: 1 })
       .limit(limit);
+    // Claim each text before working on it, so two overlapping sweeps never
+    // reword (and pay for) the same one.
+    const pending: any[] = [];
+    for (const c of candidates) {
+      const claimed = await this.narratives.findOneAndUpdate(
+        {
+          _id: c._id,
+          $or: [
+            { rewordOutcome: 'pending' },
+            { rewordOutcome: 'working', rewordClaimedAt: { $lt: stale } },
+          ],
+        },
+        { $set: { rewordOutcome: 'working', rewordClaimedAt: new Date() } },
+        { new: true },
+      );
+      if (claimed) pending.push(claimed);
+    }
     let handled = 0;
     const courses = new Map<string, { sim: any; names: string[] } | null>();
     for (const row of pending) {
@@ -695,7 +730,7 @@ export class NarrativesService {
       handled += 1;
       if (!course || (await this.ai.state(course.sim as any)) !== 'on') {
         await this.narratives.updateOne(
-          { _id: row._id },
+          { _id: row._id, rewordOutcome: 'working' },
           { $set: { rewordOutcome: 'off' } },
         );
         continue;
@@ -735,8 +770,10 @@ export class NarrativesService {
       outputTokens: usage.outputTokens,
       sentencesDropped: outcome === 'checks_failed' ? 1 : 0,
     });
+    // Only if the text is still the one we reworded: a rebuild during the call
+    // replaces the engine text and resets it to pending.
     await this.narratives.updateOne(
-      { _id: row._id },
+      { _id: row._id, rewordOutcome: 'working', engineText: row.engineText },
       { $set: { text, rewordOutcome: outcome } },
     );
   }

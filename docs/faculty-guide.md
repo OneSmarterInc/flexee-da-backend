@@ -136,7 +136,7 @@ Students see the outcome and one line per test with the figure, for example "Fin
 - **Invitees.** Every invitation and its state: waiting for a reply, accepted, declined or expired. You can resend waiting and expired invitations.
 - **Students.** Everyone enrolled, with their firm and state. Open a student to see their details, block or unblock them or update their payment.
 - **Firm allocation.** Place each student in a firm.
-- **Performance overview.** Compares firms across quarters with charts, and a leaderboard showing each firm's outcome and missed quarters. Pick a quarter to see standings as of then.
+- **Performance overview.** Compares firms across quarters with charts, and a leaderboard showing each firm's outcome and missed quarters. Pick a quarter to see standings as of then. An outcome always covers every closed student quarter, whichever quarter you pick.
 - **Firm dashboard KPIs.** The four perspective scores for each firm in each quarter, with the leader in each column.
 - **Firm page.** One firm's results and its team members.
 

@@ -9,7 +9,8 @@
  * Students' own words are a second kind of source: a figure found only there passes only inside quotation marks,
  * so Claude can quote what a team wrote but never state it as fact.
  */
-const NUMBER = /(?<![\w.])\$?\d[\d,]*(?:\.\d+)?%?/gu;
+// A minus sign is part of the figure: "-$50,000" is not "$50,000".
+const NUMBER = /(?<![\w.])[-\u2212]?\$?\d[\d,]*(?:\.\d+)?%?/gu;
 
 export interface FigureCheckResult {
   answer: string;
@@ -18,10 +19,15 @@ export interface FigureCheckResult {
 }
 
 export function normaliseFigure(figure: string) {
-  let n = figure.replace(/,$/, '').replace(/[$,%]/g, '');
+  const negative = /^[-\u2212]/.test(figure);
+  let n = figure
+    .replace(/^[-\u2212]/, '')
+    .replace(/,$/, '')
+    .replace(/[$,%]/g, '');
   if (n.includes('.')) n = n.replace(/0+$/, '').replace(/\.$/, '');
   n = n.replace(/^0+/, '');
-  return n === '' ? '0' : n;
+  if (n === '') return '0';
+  return negative ? `-${n}` : n;
 }
 
 export function figures(sources: string[]) {

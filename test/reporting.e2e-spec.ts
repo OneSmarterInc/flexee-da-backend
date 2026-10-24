@@ -114,6 +114,8 @@ describe('Reporting connector (e2e)', () => {
   beforeAll(async () => {
     process.env.JWT_SECRET = process.env.JWT_SECRET || 'e2e-only';
     process.env.CRON_QUARTER_TICK_ENABLED = 'false';
+    // The health row says AI is off: don't let a developer's .env turn it on.
+    process.env.FLEXEE_LLM_PROVIDER = '';
     const moduleFixture: TestingModule = await Test.createTestingModule({
       imports: [AppModule],
     }).compile();

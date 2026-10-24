@@ -90,7 +90,9 @@ export function outcomeFor(
   const testLines = tests.map((t, i) => {
     const name = TESTS[i].name;
     if (t.average === null) return `${name}: no figures yet.`;
-    const avg = Math.round(t.average);
+    // Whole numbers, unless rounding would hide where the average sits against the bar.
+    const rounded = Math.round(t.average);
+    const avg = rounded === OUTCOME_BAR && t.average !== OUTCOME_BAR ? t.average.toFixed(1) : String(rounded);
     const rel =
       t.average > OUTCOME_BAR ? 'above' : t.average === OUTCOME_BAR ? 'at' : 'below';
     return `${name}: your average was ${avg}, ${rel} the ${OUTCOME_BAR} needed.`;

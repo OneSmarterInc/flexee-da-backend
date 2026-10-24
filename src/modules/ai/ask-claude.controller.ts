@@ -27,6 +27,17 @@ import { assertCourseAccess } from '../simulation/course-access';
 import { AiSwitchDto, AskQuestionDto } from './ask-claude.dto';
 import { AskClaudeService, AskRefused } from './ask-claude.service';
 
+/** What is on screen, kept small: at most 10 entries, keys up to 60 and values up to 200 characters, strings only. */
+export function cleanDetails(details: unknown): Record<string, string> {
+  if (!details || typeof details !== 'object' || Array.isArray(details)) return {};
+  return Object.fromEntries(
+    Object.entries(details as Record<string, unknown>)
+      .filter(([, v]) => typeof v === 'string')
+      .slice(0, 10)
+      .map(([k, v]) => [k.slice(0, 60), (v as string).slice(0, 200)]),
+  );
+}
+
 /** Ask Claude on every faculty course page, for the course's faculty and admins. */
 @ApiTags('Ask Claude')
 @Controller('simulations/:id')
@@ -77,7 +88,7 @@ export class AskClaudeController {
       return await this.ask.ask({
         userId: String(req.user._id),
         simulation: sim,
-        context: body.context,
+        context: { ...body.context, details: cleanDetails(body.context.details) },
         question: body.question,
         conversationId: body.conversationId,
       });

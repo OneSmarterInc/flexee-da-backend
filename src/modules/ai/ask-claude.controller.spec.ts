@@ -5,7 +5,7 @@ import { Types } from 'mongoose';
 import { UserRole } from '../../entities/index.entity';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { assertCourseAccess } from '../simulation/course-access';
-import { AskClaudeController } from './ask-claude.controller';
+import { AskClaudeController, cleanDetails } from './ask-claude.controller';
 
 const guard = new RolesGuard(new Reflector());
 const as = (role: UserRole, handler: (...a: never[]) => unknown) =>
@@ -91,5 +91,26 @@ describe('assertCourseAccess', () => {
     expect(() =>
       assertCourseAccess({ role: UserRole.STUDENT, _id: owner }, sim),
     ).toThrow(ForbiddenException);
+  });
+});
+
+describe('cleanDetails', () => {
+  it('keeps at most 10 string entries, with keys up to 60 and values up to 200 characters', () => {
+    const big = Object.fromEntries(
+      Array.from({ length: 30 }, (_, i) => [
+        `k${i}`.padEnd(80, 'x'),
+        'v'.repeat(500),
+      ]),
+    );
+    const clean = cleanDetails({ ...big, number: 5, nested: { a: 1 } });
+    const entries = Object.entries(clean);
+    expect(entries.length).toBe(10);
+    for (const [k, v] of entries) {
+      expect(k.length).toBeLessThanOrEqual(60);
+      expect(v.length).toBeLessThanOrEqual(200);
+    }
+    expect(cleanDetails(undefined)).toEqual({});
+    expect(cleanDetails([1, 2])).toEqual({});
+    expect(cleanDetails({ quarter: '7' })).toEqual({ quarter: '7' });
   });
 });

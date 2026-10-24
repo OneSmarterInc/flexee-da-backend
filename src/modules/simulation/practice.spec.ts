@@ -2,7 +2,11 @@
 // Practice courses (V3 Design E): no deadlines, left out of the connector,
 // test accounts only in practice, and who may decide.
 
-import { BadRequestException, ForbiddenException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+} from '@nestjs/common';
 import { Connection, Model, Types } from 'mongoose';
 import {
   clearTestDb,
@@ -198,6 +202,81 @@ describeDb('practice courses', () => {
       ).resolves.toBeUndefined();
       await expect(
         svc.assertCanDecide(undefined, c.sim, c.mine),
+      ).resolves.toBeUndefined();
+    });
+  });
+
+  describe('Start over and course access', () => {
+    function service() {
+      const svc: any = Object.create(SimulationService.prototype);
+      Object.assign(svc, {
+        simulationModel: Sim,
+        decisionModel: Dec,
+        firmModel: Firms,
+      });
+      return svc;
+    }
+    const owner = new Types.ObjectId();
+
+    it('Start over refuses while a quarter is closing', async () => {
+      const sim = await Sim.collection.insertOne({
+        name: 'p',
+        isPractice: true,
+        owner,
+        facultyIds: [],
+        status: 'IN_PROGRESS',
+        currentQuarter: 6,
+        closingQuarter: 6,
+        closingStartedAt: new Date(),
+      });
+      await expect(
+        service().resetPractice(
+          { _id: owner, role: UserRole.FACULTY },
+          String(sim.insertedId),
+        ),
+      ).rejects.toThrow(ConflictException);
+    });
+
+    it('Start over refuses a live course', async () => {
+      const sim = await Sim.collection.insertOne({
+        name: 'live',
+        isPractice: false,
+        owner,
+        facultyIds: [],
+        currentQuarter: 6,
+      });
+      await expect(
+        service().resetPractice(
+          { _id: owner, role: UserRole.FACULTY },
+          String(sim.insertedId),
+        ),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it("Advance and Extend are for the course's own faculty: assertAccess refuses other faculty and students", async () => {
+      const sim = await Sim.collection.insertOne({
+        name: 'live',
+        owner,
+        facultyIds: [],
+      });
+      const id = String(sim.insertedId);
+      await expect(
+        service().assertAccess({ _id: owner, role: UserRole.FACULTY }, id),
+      ).resolves.toBeUndefined();
+      await expect(
+        service().assertAccess(
+          { _id: new Types.ObjectId(), role: UserRole.FACULTY },
+          id,
+        ),
+      ).rejects.toThrow(ForbiddenException);
+      await expect(
+        service().assertAccess({ _id: owner, role: UserRole.STUDENT }, id),
+      ).rejects.toThrow(ForbiddenException);
+      await expect(
+        service().assertAccess(
+          { _id: new Types.ObjectId(), role: UserRole.ADMIN },
+          id,
+        ),
       ).resolves.toBeUndefined();
     });
   });

@@ -25,6 +25,7 @@ import {
   Controller,
   Get,
   Param,
+  Req,
   BadRequestException,
   NotFoundException,
   UseGuards,
@@ -35,6 +36,7 @@ import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { UserRole } from '../../entities/index.entity';
 import { ReportsService } from './reports.service';
+import { redactOtherOutcomes } from './outcome-redact';
 
 @Controller('reports')
 @UseGuards(JwtAuthGuard)
@@ -94,14 +96,19 @@ export class ReportsController {
     @Param('simulationId') simulationId: string,
     @Param('firmId') firmId: string,
     @Param('quarter') quarter: string,
+    @Req() req?: any,
   ) {
     const quarterNum = this.parseQuarter(quarter);
 
-    return this.reportsService.getCompetitorComparison(
+    const result: any = await this.reportsService.getCompetitorComparison(
       simulationId,
       firmId,
       quarterNum,
     );
+    if (req?.user?.role !== UserRole.STUDENT || !Array.isArray(result?.peers)) return result;
+    // A student sees their own firm's outcome, not the others'.
+    const own = await this.reportsService.studentFirmId(simulationId, req.user._id);
+    return { ...result, peers: redactOtherOutcomes(result.peers, own, (p: any) => p.firmId) };
   }
 
   // ============================================================================
@@ -113,10 +120,11 @@ export class ReportsController {
     @Param('simulationId') simulationId: string,
     @Param('firmId') firmId: string,
     @Param('quarter') quarter: string,
+    @Req() req?: any,
   ) {
     const quarterNum = this.parseQuarter(quarter);
 
-    const scorecard = await this.reportsService.getBalancedScorecard(
+    const scorecard: any = await this.reportsService.getBalancedScorecard(
       simulationId,
       firmId,
       quarterNum,
@@ -128,6 +136,11 @@ export class ReportsController {
       );
     }
 
+    // A student sees their own firm's outcome, not another firm's.
+    if (req?.user?.role === UserRole.STUDENT) {
+      const own = await this.reportsService.studentFirmId(simulationId, req.user._id);
+      if (own !== firmId) return { ...scorecard, outcome: null };
+    }
     return scorecard;
   }
 

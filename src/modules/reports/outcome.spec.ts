@@ -1,4 +1,5 @@
 import { outcomeFor } from './outcome';
+import { redactOtherOutcomes } from './outcome-redact';
 
 const TOTAL = 11;
 
@@ -97,7 +98,10 @@ describe('outcomeFor', () => {
     }));
     const o = outcomeFor(
       warmup,
-      [1, 2, 3].map((quarter) => ({ quarter, submittedHow: 'carried_forward' })),
+      [1, 2, 3].map((quarter) => ({
+        quarter,
+        submittedHow: 'carried_forward',
+      })),
       TOTAL,
     );
     expect(o.label).toBeNull();
@@ -106,7 +110,10 @@ describe('outcomeFor', () => {
 
   it('ignores warm-up quarters in the averages and the missed count', () => {
     const rows = [
-      { quarter: 1, bsc: { financial: 0, customer: 0, process: 0, learning: 0 } },
+      {
+        quarter: 1,
+        bsc: { financial: 0, customer: 0, process: 0, learning: 0 },
+      },
       ...kpis(1, [80, 80, 80, 80]),
     ];
     const o = outcomeFor(
@@ -126,5 +133,41 @@ describe('outcomeFor', () => {
       'Process: your average was 70, at the 70 needed.',
       'Learning: your average was 90, above the 70 needed.',
     ]);
+  });
+
+  it('shows one decimal when rounding would hide where the average sits against the bar', () => {
+    const below = outcomeFor(
+      kpis(2, [69.6, 70.3, 70, 90]),
+      decisions(2),
+      TOTAL,
+    );
+    expect(below.lines[0]).toBe(
+      'Financial: your average was 69.6, below the 70 needed.',
+    );
+    expect(below.lines[1]).toBe(
+      'Customer: your average was 70.3, above the 70 needed.',
+    );
+    expect(below.lines[2]).toBe(
+      'Process: your average was 70, at the 70 needed.',
+    );
+  });
+});
+
+describe('redactOtherOutcomes', () => {
+  const rows = [
+    { firmId: 'a', outcome: { label: 'x' } },
+    { firmId: 'b', outcome: { label: 'y' } },
+  ];
+  it("keeps the student's own outcome and nulls the others'", () => {
+    const out = redactOtherOutcomes(rows, 'a', (r) => r.firmId);
+    expect(out[0].outcome).toEqual({ label: 'x' });
+    expect(out[1].outcome).toBeNull();
+  });
+  it('nulls every outcome for a student with no firm', () => {
+    expect(
+      redactOtherOutcomes(rows, null, (r) => r.firmId).every(
+        (r) => r.outcome === null,
+      ),
+    ).toBe(true);
   });
 });

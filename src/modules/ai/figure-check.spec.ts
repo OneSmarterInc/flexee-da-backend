@@ -61,3 +61,28 @@ describe('the figure check', () => {
     expect(r.answer).toBe('The note said "save 40% by June".');
   });
 });
+
+describe('signs', () => {
+  it('treats "-$50,000" and "$50,000" as different figures', () => {
+    expect(normaliseFigure('-$50,000')).toBe('-50000');
+    expect(normaliseFigure('$50,000')).toBe('50000');
+    const r = figureCheck('Net income was $50,000.', [
+      'Net income was -$50,000.',
+    ]);
+    expect(r.answer).toBe('');
+    expect(figureCheck('Net income was -$50,000.', ['-50000']).answer).toBe(
+      'Net income was -$50,000.',
+    );
+  });
+
+  it('a range or a date does not read as a negative figure', () => {
+    const r = figureCheck('Quarters 4-7 closed on 2026-10-30.', [
+      '4',
+      '7',
+      '2026',
+      '10',
+      '30',
+    ]);
+    expect(r.dropped).toEqual([]);
+  });
+});

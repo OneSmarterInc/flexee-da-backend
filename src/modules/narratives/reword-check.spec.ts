@@ -114,3 +114,31 @@ describe('the reword check', () => {
     ).toEqual({ ok: false, reason: 'banned_word' });
   });
 });
+
+describe('signs and numbers inside names', () => {
+  it('drops a rewording that turns "-$50,000" into "$50,000"', () => {
+    expect(
+      rewordCheck('Net income was -$50,000.', 'Net income was $50,000.', []),
+    ).toEqual({ ok: false, reason: 'figure' });
+    expect(
+      rewordCheck(
+        'Net income was -$50,000.',
+        'Net income came to -$50,000.',
+        [],
+      ),
+    ).toEqual({ ok: true });
+  });
+
+  it('drops "Q9" when the engine text says "Q8"', () => {
+    expect(
+      rewordCheck(
+        'Quarter 8 closed. Q8 had 4 firms submit.',
+        'Q9 closed and 4 firms submitted.',
+        [],
+      ),
+    ).toEqual({ ok: false, reason: 'figure' });
+    expect(rewordCheck('Q8 closed.', 'Q8 has closed.', [])).toEqual({
+      ok: true,
+    });
+  });
+});

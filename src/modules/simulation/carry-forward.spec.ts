@@ -62,4 +62,43 @@ describeDb('carryForwardDecision submittedHow', () => {
     await svc.carryForwardDecision(sim, firm, 4);
     expect((await find(4)).submittedHow).toBe('baseline');
   });
+
+  it('promotes a draft the team saved, and a legacy draft with no flag', async () => {
+    await Dec.create({ simulation: sim, firm, quarter: 5, editedByTeam: true });
+    await svc.carryForwardDecision(sim, firm, 5);
+    expect((await find(5)).submittedHow).toBe('draft_promoted');
+    await clearTestDb(conn);
+    await Dec.collection.insertOne({
+      simulation: sim,
+      firm,
+      quarter: 5,
+      status: DecisionStatus.DRAFT,
+    });
+    await svc.carryForwardDecision(sim, firm, 5);
+    expect((await find(5)).submittedHow).toBe('draft_promoted');
+  });
+
+  it("does not count a draft made only by opening the cockpit as played: last quarter's decisions are carried forward", async () => {
+    await Dec.create({
+      simulation: sim,
+      firm,
+      quarter: 4,
+      status: DecisionStatus.PROCESSED,
+      submittedHow: 'team',
+      priceP1: 777,
+    });
+    await Dec.create({
+      simulation: sim,
+      firm,
+      quarter: 5,
+      editedByTeam: false,
+    });
+    await svc.carryForwardDecision(sim, firm, 5);
+    const d = await find(5);
+    expect(d.submittedHow).toBe('carried_forward');
+    expect(d.priceP1).toBe(777);
+    expect(
+      await Dec.countDocuments({ simulation: sim, firm, quarter: 5 }),
+    ).toBe(1);
+  });
 });

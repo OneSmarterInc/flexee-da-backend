@@ -31,6 +31,12 @@ import {
 
 dotenv.config();
 
+// The seeder resets demo data and creates known accounts: never on production.
+if (process.env.NODE_ENV === 'production') {
+  console.error('Refusing to run the seeder when NODE_ENV=production.');
+  process.exit(1);
+}
+
 const PASSWORD = 'Demo1234!';
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
 const DEMO_COURSE_CODE = 'FLEXEE-DA-SLICE1';
@@ -67,6 +73,26 @@ async function upsertUser(UserModel: Model<any>, data: any, password: string = P
     },
     { upsert: true, new: true, setDefaultsOnInsert: true },
   );
+}
+
+/**
+ * A named account whose password comes from the environment, never from this
+ * file. An account that already exists keeps its password: the seeder sets a
+ * password only when it creates the account.
+ */
+async function ensureEnvUser(UserModel: Model<any>, data: any, envName: string) {
+  const email = data.email.toLowerCase();
+  const password = process.env[envName];
+  if (!password) {
+    console.log(`Skipped ${email}: set ${envName} to create it.`);
+    return;
+  }
+  if (await UserModel.exists({ email })) {
+    console.log(`${email} already exists; its password was left alone.`);
+    return;
+  }
+  await upsertUser(UserModel, data, password);
+  console.log(`Created ${email} (password from ${envName}).`);
 }
 
 async function deleteDemoSimulation(models: DemoModels): Promise<void> {
@@ -148,23 +174,23 @@ async function runSeeder() {
       organization: 'FLEXEE DA',
     });
 
-    await upsertUser(UserModel, {
+    await ensureEnvUser(UserModel, {
       email: 'faculty1@flexee.com',
       firstName: 'Faculty',
       lastName: 'One',
       displayName: 'Faculty One',
       role: UserRole.FACULTY,
       organization: 'FLEXEE DA',
-    }, 'Faculty@123456');
+    }, 'SEED_FACULTY_PASSWORD');
 
-    await upsertUser(UserModel, {
+    await ensureEnvUser(UserModel, {
       email: 'admin@flexee.com',
       firstName: 'Admin',
       lastName: 'User',
       displayName: 'Admin User',
       role: UserRole.ADMIN,
       organization: 'FLEXEE DA',
-    }, 'Admin@123456');
+    }, 'SEED_ADMIN_PASSWORD');
 
     const students = await Promise.all([1, 2, 3].map((n) =>
       upsertUser(UserModel, {
@@ -240,8 +266,7 @@ async function runSeeder() {
 
     console.log('\nFLEXEE DA Slice 1 seed complete.');
     console.log(`Faculty: faculty@flexeeda.com / ${PASSWORD}`);
-    console.log('Faculty: faculty1@flexee.com / Faculty@123456');
-    console.log('Admin: admin@flexee.com / Admin@123456');
+    console.log('Also: faculty1@flexee.com and admin@flexee.com, with the passwords you set in SEED_FACULTY_PASSWORD and SEED_ADMIN_PASSWORD.');
     console.log(`Students: student1@flexeeda.com, student2@flexeeda.com, student3@flexeeda.com / ${PASSWORD}`);
     console.log(`Faculty dashboard: ${FRONTEND_URL}/dashboard/faculty`);
     console.log(`Student login: ${FRONTEND_URL}/login`);

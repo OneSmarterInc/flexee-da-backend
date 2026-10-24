@@ -158,6 +158,7 @@ export class AskClaudeTools {
     }
     if (name === 'get_firm_detail') return this.lookups.firmDetail(input);
     if (name === 'get_decisions') return this.lookups.decisions(input);
+    if (name === 'get_readings') return this.lookups.readings(input);
     if (name === 'get_forecast_accuracy')
       return this.lookups.forecastAccuracy(input);
     return { error: `There is no lookup called ${name}.` };
@@ -194,6 +195,10 @@ export class AskClaudeTools {
       return `${String(result.firm)}'s latest results and outcome`;
     if (name === 'get_decisions')
       return `${String(result.firm)}'s Quarter ${String(result.quarter)} decisions`;
+    if (name === 'get_readings') {
+      const n = (result.readings as unknown[]).length;
+      return `the written readings, ${n} ${n === 1 ? 'quarter' : 'quarters'}`;
+    }
     if (name === 'get_forecast_accuracy')
       return 'forecast accuracy by firm and quarter';
     return 'nothing';

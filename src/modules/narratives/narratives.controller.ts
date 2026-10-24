@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Controller,
   ForbiddenException,
   Get,
@@ -78,6 +79,7 @@ export class NarrativesController {
     @Req() req: any,
   ) {
     const sim = await this.course(id);
+    if (!Types.ObjectId.isValid(firmId)) throw new BadRequestException('Invalid firm id');
     if (req.user.role === UserRole.STUDENT) {
       const own = await this.studentFirm(sim, req.user);
       if (!own || own !== firmId)

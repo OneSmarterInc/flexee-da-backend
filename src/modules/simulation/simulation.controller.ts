@@ -38,6 +38,7 @@ import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { UserRole } from '@/entities/index.entity';
 import { SimulationService } from './simulation.service';
+import { redactOtherOutcomes } from '../reports/outcome-redact';
 
 @ApiTags('Simulations')
 @Controller('simulations')
@@ -234,8 +235,16 @@ export class SimulationController {
   async getLeaderboard(
     @Param('simulationId') simulationId: string,
     @Query('quarter') quarter?: number,
+    @Req() req?: any,
   ) {
-    return this.simulationService.getLeaderboard(simulationId, quarter);
+    const board = await this.simulationService.getLeaderboard(simulationId, quarter);
+    if (req?.user?.role !== UserRole.STUDENT || !Array.isArray(board?.rankings)) return board;
+    // A student sees their own firm's outcome, not the others'.
+    const own = await this.simulationService.studentFirmId(simulationId, req.user._id);
+    return {
+      ...board,
+      rankings: redactOtherOutcomes(board.rankings, own, (r: any) => r.firmId && String(r.firmId)),
+    };
   }
 
   @Get(':simulationId/scrm')
@@ -979,7 +988,8 @@ export class SimulationController {
   @ApiForbiddenResponse({
     description: 'Only admins and faculty can advance quarters',
   })
-  async advanceQuarter(@Param('simulationId') simulationId: string) {
+  async advanceQuarter(@Param('simulationId') simulationId: string, @Req() req?: any) {
+    await this.simulationService.assertAccess(req.user, simulationId);
     return this.simulationService.advanceQuarter(simulationId);
   }
 
@@ -1004,7 +1014,9 @@ export class SimulationController {
     @Query('quarter') quarter: number,
     @Query('days') days: number,
     @Query('reason') reason?: string,
+    @Req() req?: any,
   ) {
+    await this.simulationService.assertAccess(req.user, simulationId);
     if (!quarter || !days) {
       throw new BadRequestException('quarter and days query parameters are required');
     }
@@ -1159,11 +1171,16 @@ export class SimulationController {
   async getBalancedScorecard(
     @Param('simulationId') simulationId: string,
     @Query('quarter') quarter?: string,
+    @Req() req?: any,
   ) {
-    return this.simulationService.getBalancedScorecard(
+    const card = await this.simulationService.getBalancedScorecard(
       simulationId,
       quarter ? parseInt(quarter) : undefined,
     );
+    if (req?.user?.role !== UserRole.STUDENT || !Array.isArray(card?.firms)) return card;
+    // A student sees their own firm's outcome, not the others'.
+    const own = await this.simulationService.studentFirmId(simulationId, req.user._id);
+    return { ...card, firms: redactOtherOutcomes(card.firms, own, (f: any) => f.firmId) };
   }
 
   // ============================================================================

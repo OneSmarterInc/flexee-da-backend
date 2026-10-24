@@ -14,6 +14,7 @@ export const NARRATIVE_KINDS = [
 export type NarrativeKind = (typeof NARRATIVE_KINDS)[number];
 export const REWORD_OUTCOMES = [
   'pending',
+  'working',
   'kept',
   'checks_failed',
   'error',
@@ -38,6 +39,8 @@ export class Narrative {
   @Prop({ type: String, default: null }) text!: string | null;
   @Prop({ type: String, enum: REWORD_OUTCOMES, default: 'pending' })
   rewordOutcome!: RewordOutcome;
+  /** When a sweep claimed this text for rewording; a claim older than 15 minutes is stale. */
+  @Prop({ type: Date, default: null }) rewordClaimedAt!: Date | null;
   createdAt!: Date;
   updatedAt!: Date;
 }

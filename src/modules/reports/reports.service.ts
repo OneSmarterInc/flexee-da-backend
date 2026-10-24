@@ -44,6 +44,9 @@ import {
   DecisionDocument,
   Simulation,
   SimulationDocument,
+  Enrollment,
+  EnrollmentDocument,
+  EnrollmentStatus,
 } from '../../entities/index.entity';
 
 @Injectable()
@@ -59,7 +62,23 @@ export class ReportsService {
     private decisionModel: Model<DecisionDocument>,
     @InjectModel(Simulation.name)
     private simulationModel: Model<SimulationDocument>,
+    @InjectModel(Enrollment.name)
+    private enrollmentModel: Model<EnrollmentDocument>,
   ) {}
+
+  /** The firm an active student is on in this course, or null. */
+  async studentFirmId(simulationId: string, userId: unknown): Promise<string | null> {
+    const e = await this.enrollmentModel
+      .findOne({
+        simulation: new Types.ObjectId(simulationId),
+        user: new Types.ObjectId(String(userId)),
+        status: { $in: [EnrollmentStatus.ACTIVE, EnrollmentStatus.COMPLETED] },
+        firm: { $ne: null },
+      })
+      .select('firm')
+      .lean();
+    return e?.firm ? String(e.firm) : null;
+  }
 
   private outcomes(simulationId: Types.ObjectId) {
     return loadOutcomes(
@@ -240,7 +259,10 @@ export class ReportsService {
     return {
       quarter,
       firmId: firmId.toString(),
-      scorecard: kpiData.bsc,
+      // Old documents still carry bsc.grade; it is never sent.
+      scorecard: (({ grade: _grade, ...rest }: any) => rest)(
+        (kpiData.bsc as any)?.toObject?.() ?? kpiData.bsc ?? {},
+      ),
       outcome: outcomes.get(firmId.toString()) ?? null,
       allMetrics: {
         financial: kpiData.financial,
